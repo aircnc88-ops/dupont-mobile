@@ -66,6 +66,21 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     chunkSizeWarningLimit: 1200,
-    rollupOptions: CDN ? { external: Object.keys(IMPORT_MAP.imports) } : {},
+    rollupOptions: CDN
+      ? {
+          external: Object.keys(IMPORT_MAP.imports),
+          // Pages build only: split into ~20-30 KB chunks so each one can be pushed via the connector.
+          output: {
+            manualChunks(id: string) {
+              const n = id.replace(/\\/g, '/');
+              if (n.includes('/packages/')) return 'strategy';
+              if (n.includes('/src/paper/')) return 'paper';
+              if (n.includes('/src/data/') || n.includes('/src/lib/') || /\/src\/use[A-Z]/.test(n)) return 'market';
+              if (n.includes('/src/components/')) return 'ui';
+              return undefined;
+            },
+          },
+        }
+      : {},
   },
 });
