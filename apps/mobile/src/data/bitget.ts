@@ -1,5 +1,6 @@
 /** Bitget PUBLIC market data (no keys). Direct fetch first (CORS allowed), same-origin /bgapi proxy fallback. */
-import type { Bar } from '../strategy/types';
+/** Numeric candle; ts = candle OPEN time (ms). Assignable to @bitget-sim/dupont CandleInput. */
+export interface Candle { ts: number; open: number; high: number; low: number; close: number; volume: number }
 
 const DIRECT = 'https://api.bitget.com';
 // same-origin proxy only exists on the Vite dev/preview server (KSHUN :5174); harmless 404 on static hosting
@@ -31,12 +32,16 @@ export const GRAN: Record<string, { api: string; sec: number }> = {
   '1h': { api: '1H', sec: 3600 },
 };
 
-export async function fetchCandles(symbol: string, tf: string, limit = 300): Promise<Bar[]> {
+export async function fetchCandles(symbol: string, tf: string, limit = 300): Promise<Candle[]> {
   const g = GRAN[tf] ?? GRAN['15m'];
   const data = await getJson(`/api/v2/mix/market/candles?productType=USDT-FUTURES&symbol=${symbol}&granularity=${g.api}&limit=${limit}`);
-  return (data as string[][])
-    .map((r) => ({ time: Math.floor(Number(r[0]) / 1000), open: +r[1], high: +r[2], low: +r[3], close: +r[4], volume: +r[5] }))
-    .sort((a, b) => a.time - b.time);
+  // dedupe by open ts (last row wins), then chronological
+  const byTs = new Map<number, Candle>();
+  for (const r of data as string[][]) {
+    const c = { ts: Number(r[0]), open: +r[1], high: +r[2], low: +r[3], close: +r[4], volume: +r[5] };
+    if (Number.isFinite(c.ts)) byTs.set(c.ts, c);
+  }
+  return [...byTs.values()].sort((a, b) => a.ts - b.ts);
 }
 
 export interface TickerInfo {

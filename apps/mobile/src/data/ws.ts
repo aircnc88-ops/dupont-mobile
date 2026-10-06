@@ -1,0 +1,113 @@
+/**
+ * Minimal Bitget PUBLIC WebSocket client (browser): ticker, books15, trade for one
+ * USDT-FUTURES instrument. No auth, no keys. Auto-reconnect with backoff; "ping" every 25s and a
+ * pong watchdog (no "pong" for 2 pings + 5s → reconnect).
+ * Verified against a live v2 message (2026-10-06): trade pushes carry `action` "snapshot" (50
+ * recent prints on subscribe) then "update"; `data` is NEWEST-FIRST; side is lowercase buy/sell.
+ */
+export interface WsTicker { last: number; mark: number; funding: number; change24h: number; bid: number; ask: number }
+export interface WsTrade { ts: number; price: number; qty: number; side: 'buy' | 'sell' }
+export interface WsBook { bids: Array<[number, number]>; asks: Array<[number, number]>; ts: number }
+export type WsStatus = 'connecting' | 'live' | 'reconnecting' | 'closed';
+
+export interface WsHandlers {
+  ticker?: (t: WsTicker) => void;
+  /** chronological (oldest → newest); `snapshot` = the initial history dump sent on subscribe */
+  trades?: (t: WsTrade[], snapshot: boolean) => void;
+  book?: (b: WsBook) => void;
+  status?: (s: WsStatus) => void;
+}
+
+const URL = 'wss://ws.bitget.com/v2/ws/public';
+
+/** Parse a v2 `trade` push: data is newest-first on the wire → returned chronological. */
+export function parseTradePush(msg: any): { trades: WsTrade[]; snapshot: boolean } {
+  const data: any[] = Array.isArray(msg?.data) ? msg.data : [];
+  const trades: WsTrade[] = data.map((r) => ({ ts: +r.ts, price: +r.price, qty: +r.size, side: r.side === 'sell' ? 'sell' : 'buy' }));
+  trades.reverse();
+  return { trades, snapshot: msg?.action === 'snapshot' };
+}
+
+export class BitgetPublicFeed {
+  private ws: WebSocket | null = null;
+  private closed = false;
+  private attempt = 0;
+  private ping: ReturnType<typeof setInterval> | null = null;
+  private lastPong = 0;
+  connectedAt = 0;
+
+  constructor(private symbol: string, private h: WsHandlers) {}
+
+  start(): void {
+    this.closed = false;
+    this.open();
+  }
+
+  stop(): void {
+    this.closed = true;
+    if (this.ping) clearInterval(this.ping);
+    this.ws?.close();
+    this.ws = null;
+    this.h.status?.('closed');
+  }
+
+  private open(): void {
+    if (this.closed) return;
+    this.h.status?.(this.attempt ? 'reconnecting' : 'connecting');
+    let ws: WebSocket;
+    try {
+      ws = new WebSocket(URL);
+    } catch {
+      return this.retry();
+    }
+    this.ws = ws;
+    ws.onopen = () => {
+      this.attempt = 0;
+      this.connectedAt = Date.now();
+      const args = ['ticker', 'books15', 'trade'].map((channel) => ({ instType: 'USDT-FUTURES', channel, instId: this.symbol }));
+      ws.send(JSON.stringify({ op: 'subscribe', args }));
+      this.lastPong = Date.now();
+      this.ping = setInterval(() => {
+        if (ws.readyState !== 1) return;
+        if (Date.now() - this.lastPong > 2 * 25_000 + 5_000) { ws.close(); return; } // stale socket → reconnect
+        ws.send('ping');
+      }, 25_000);
+      this.h.status?.('live');
+    };
+    ws.onmessage = (ev) => {
+      const raw = typeof ev.data === 'string' ? ev.data : '';
+      if (raw === 'pong') { this.lastPong = Date.now(); return; }
+      if (!raw) return;
+      let msg: any;
+      try {
+        msg = JSON.parse(raw);
+      } catch {
+        return;
+      }
+      const ch = msg?.arg?.channel;
+      const data = msg?.data;
+      if (!ch || !Array.isArray(data) || !data.length) return;
+      if (ch === 'ticker') {
+        const r = data[0];
+        this.h.ticker?.({ last: +r.lastPr, mark: +(r.markPrice ?? r.lastPr), funding: +(r.fundingRate ?? 0), change24h: +(r.change24h ?? 0), bid: +r.bidPr, ask: +r.askPr });
+      } else if (ch === 'books15') {
+        const r = data[0];
+        this.h.book?.({ bids: (r.bids ?? []).map((x: string[]) => [+x[0], +x[1]]), asks: (r.asks ?? []).map((x: string[]) => [+x[0], +x[1]]), ts: +r.ts });
+      } else if (ch === 'trade') {
+        const t = parseTradePush(msg);
+        this.h.trades?.(t.trades, t.snapshot);
+      }
+    };
+    ws.onclose = () => {
+      if (this.ping) clearInterval(this.ping);
+      if (!this.closed) this.retry();
+    };
+    ws.onerror = () => ws.close();
+  }
+
+  private retry(): void {
+    this.h.status?.('reconnecting');
+    const delay = Math.min(30_000, 1000 * 2 ** this.attempt++);
+    setTimeout(() => this.open(), delay);
+  }
+}

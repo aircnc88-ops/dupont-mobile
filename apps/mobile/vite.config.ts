@@ -23,6 +23,7 @@ const IMPORT_MAP = {
     'react/jsx-runtime': 'https://esm.sh/react@18.3.1/jsx-runtime',
     'react-dom/client': 'https://esm.sh/react-dom@18.3.1/client?deps=react@18.3.1',
     'lightweight-charts': 'https://esm.sh/lightweight-charts@4.2.0',
+    'decimal.js': 'https://esm.sh/decimal.js@10.6.0',
   },
 };
 const cdnPlugin = {
@@ -39,6 +40,7 @@ export default defineConfig({
   resolve: {
     alias: [
       // Deep (sub-path) imports into package sources — reuse without touching package code.
+      { find: /^@bitget-sim\/dupont$/, replacement: path.join(pkgs, 'dupont/src/index.ts') },
       { find: /^@bitget-sim\/shared$/, replacement: path.join(pkgs, 'shared/src/index.ts') },
       { find: /^@bitget-sim\/shared\/(.*)$/, replacement: path.join(pkgs, 'shared/src/$1') },
       { find: /^@bitget-sim\/engine\/(.*)$/, replacement: path.join(pkgs, 'engine/src/$1') },
@@ -59,6 +61,8 @@ export default defineConfig({
     allowedHosts: true,
     proxy: bitgetProxy,
   },
+  // Pages build: wrap minified output at ~160 cols so the bundle is pushable/diffable as plain text
+  esbuild: CDN ? { lineLimit: 160, charset: 'ascii' } : undefined,
   build: {
     outDir: 'dist',
     chunkSizeWarningLimit: 1200,

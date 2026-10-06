@@ -10,6 +10,7 @@ export default defineConfig({
   },
   resolve: {
     alias: [
+      { find: /^@bitget-sim\/dupont$/, replacement: path.join(pkgs, 'dupont/src/index.ts') },
       { find: /^@bitget-sim\/shared$/, replacement: path.join(pkgs, 'shared/src/index.ts') },
       { find: /^@bitget-sim\/shared\/(.*)$/, replacement: path.join(pkgs, 'shared/src/$1') },
       { find: /^@bitget-sim\/engine\/(.*)$/, replacement: path.join(pkgs, 'engine/src/$1') },
