@@ -81,7 +81,7 @@ export default function App() {
     const h = await fetchFundingHistory(sym).catch(() => null);
     if (h?.length) { broker.current.setSettledRates(sym, h); save(K_BROKER, broker.current.state); }
   };
-  // ---- N1 offline replay + R1 gate: on open / resume (and on any tick that finds a gap), replay closed 1m bars
+  // ---- N1 offline replay + R1 gate: on open / resume (and on any tick that finds a gap), replay 1m bars (incl. the forming one)
   // since the last processed price; live ticks never jump an offline gap (lib/replayGate.ts) ----
   const gate = useRef(new ReplayGate());
   /** one live price for `sym`: triggers, then funding for crossed boundaries, then remember the ticker rate */
@@ -105,14 +105,24 @@ export default function App() {
         const now = mkt.serverNow();
         const start = Math.floor(replayFrom(b.state, sym) / 60_000) * 60_000;
         const { bars, clampedFrom } = await fetchMinuteBars(sym, start, now);
-        const ev = b.replayBars(sym, bars.filter((c) => c.ts >= start && c.ts + 60_000 <= now));
+        // Q1: a long replay can run into the next minute — top up the tail so no minute up to "now" is skipped
+        const end = mkt.serverNow();
+        if (Math.floor(end / 60_000) > Math.floor(now / 60_000)) {
+          const tail = await fetchMinuteBars(sym, Math.floor(now / 60_000) * 60_000, end);
+          const byTs = new Map(bars.map((c) => [c.ts, c]));
+          for (const c of tail.bars) byTs.set(c.ts, c);
+          bars.splice(0, bars.length, ...[...byTs.values()].sort((x, y) => x.ts - y.ts));
+        }
+        // Q1: include the still-forming minute (Bitget returns it with its high/low so far): the time between the
+        // last closed bar and the end of the replay must not be skipped (live ticks were refused meanwhile)
+        const ev = b.replayBars(sym, bars.filter((c) => c.ts >= start), mkt.serverNow());
         // only the last 2 toasts stay visible: fold long funding runs into one line, show the clamp warning last
         const fund = ev.filter((e) => e.kind === 'funding');
         (fund.length > 2 ? ev.filter((e) => e.kind !== 'funding') : ev).forEach((e) => toast(`[재생] ${sym} ${e.message}`, e.kind === 'sl' || e.kind === 'liq' ? 'down' : e.kind === 'funding' ? 'info' : 'up'));
         if (fund.length > 2) toast(`[재생] ${sym} 펀딩비 ${fund.length}회 반영 (마지막: ${fund[fund.length - 1].message})`, 'info');
         if (clampedFrom > start) toast(`[재생] ${sym} ${mdhm(start)}~${mdhm(clampedFrom)} 구간은 1분봉 제공 범위(30일) 밖 – 재생 생략`, 'warn');
         const lt = (b.state.lastTickTs ??= {});
-        lt[sym] = Math.max(lt[sym] ?? 0, Date.now()); // gap closed; the forming minute continues live
+        lt[sym] = Math.max(lt[sym] ?? 0, Date.now()); // gap closed (forming minute replayed up to now, Q1); live continues
         gate.current.succeeded(sym);
         commit();
       } catch {
