@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { detectBox, generateSignals, pressureFromOHLCV, type Box, type DetectBoxOptions, type Pressure, type Signal, type SignalType } from '@bitget-sim/dupont';
+import { atr as atrOf, detectBox, generateSignals, pressureFromOHLCV, type Box, type DetectBoxOptions, type Pressure, type Signal, type SignalType } from '@bitget-sim/dupont';
 import type { Candle } from './data/bitget';
 import type { TapeBuckets } from './lib/tape';
 import { SLIPPAGE_BPS, TAKER_FEE } from './paper/broker';
@@ -14,11 +14,14 @@ export function manualToBox(m: ManualBox, candles: readonly Candle[], toleranceP
   let startIndex = candles.findIndex((c) => c.ts >= m.startTs);
   if (startIndex < 0) startIndex = Math.max(0, candles.length - 60);
   const endIndex = Math.max(0, candles.length - 1);
+  // N8: real ATR so manual-box signal SLs get the same max(0.03%, 0.1 × ATR) buffer as detected boxes
+  const a = candles.length > 1 ? atrOf(candles.slice(-80), 14) : NaN;
+  const atr = Number.isFinite(a) ? a : 0;
   return {
     top: String(top), bottom: String(bottom), mid: String((top + bottom) / 2), height: String(top - bottom),
     startTime: candles[startIndex]?.ts ?? m.startTs, endTime: candles[endIndex]?.ts ?? m.startTs,
     startIndex, endIndex, touchesTop: 2, touchesBottom: 2, topPivots: [], bottomPivots: [],
-    atr: 0, heightAtr: 0, insideShare: 1, tolerancePct, isRange: true,
+    atr, heightAtr: atr > 0 ? (top - bottom) / atr : 0, insideShare: 1, tolerancePct, isRange: true,
   };
 }
 
@@ -44,7 +47,9 @@ export function signalBoxFor(closed: readonly Candle[], boxOpts: DetectBoxOption
   return manualBox ?? (closed.length > 11 ? detectBox(closed.slice(0, -1), boxOpts) : null);
 }
 /** a candle counts as closed only once the SERVER clock is this far past its end (late prints) */
-const CLOSE_GRACE_MS = 1500;
+export const CLOSE_GRACE_MS = 1500;
+/** B6: the last candle is still forming until the SERVER clock passes its end + grace (phone clock skew cannot close it early). */
+export const isForming = (lastTs: number, intervalMs: number, serverNow: number) => serverNow < lastTs + intervalMs + CLOSE_GRACE_MS;
 
 export function useDupont(
   candles: Candle[],
@@ -67,7 +72,7 @@ export function useDupont(
 
   // closed = the server clock is past the candle end (+grace); phone clock skew cannot repaint
   const last = candles[candles.length - 1];
-  const forming = !!last && serverNow() < last.ts + intervalMs + CLOSE_GRACE_MS;
+  const forming = !!last && isForming(last.ts, intervalMs, serverNow());
   const closed = useMemo(() => (forming ? candles.slice(0, -1) : candles), [candles, forming]);
 
   const pressures = useMemo(

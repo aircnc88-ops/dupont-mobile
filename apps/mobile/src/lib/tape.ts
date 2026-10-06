@@ -10,9 +10,10 @@ export interface TapeTrade { ts: number; qty: number; side: 'buy' | 'sell' }
  * Per-minute aggressor buy/sell totals built ON ARRIVAL (item A5): memory is bounded by the
  * number of minutes kept, not by the trade count, so a busy candle is never truncated.
  *
- * Coverage (items A5 + C7): a candle counts as tape-sourced only when it starts at/after the
- * first full minute after the first connect (`coverFrom`) and does not overlap a disconnect
- * gap `[floor(disconnect), ceil(reconnect))`. Buckets survive reconnects.
+ * Coverage (items A5 + C7 + N2–N4): a candle counts as tape-sourced only when it starts at/after
+ * the first full minute after the first connect (`coverFrom`, anchored on the newest snapshot
+ * print's server ts) and after the oldest kept minute, and does not overlap a disconnect gap
+ * `[floor(last message), ceil(newest print on reconnect))`. Buckets survive reconnects.
  */
 export class TapeBuckets {
   private b = new Map<number, Bucket>();
@@ -32,8 +33,16 @@ export class TapeBuckets {
   connected(ts: number): void {
     const start = Math.ceil(ts / TAPE_BUCKET_MS) * TAPE_BUCKET_MS;
     if (!Number.isFinite(this.coverFrom)) this.coverFrom = start;
-    else if (this.downSince !== null) this.gaps.push([Math.floor(this.downSince / TAPE_BUCKET_MS) * TAPE_BUCKET_MS, start]);
+    else if (this.downSince !== null) {
+      const from = Math.floor(this.downSince / TAPE_BUCKET_MS) * TAPE_BUCKET_MS;
+      if (start > from) this.gaps.push([from, start]);
+    }
     this.downSince = null;
+  }
+
+  /** true until the first connect, and while a disconnect is open (no reconnect anchor yet) */
+  get awaitingConnect(): boolean {
+    return !Number.isFinite(this.coverFrom) || this.downSince !== null;
   }
 
   disconnected(ts: number): void {
@@ -54,6 +63,8 @@ export class TapeBuckets {
       for (const k of keys.slice(0, this.b.size - this.maxBuckets)) this.b.delete(k);
       const oldest = keys[keys.length - this.b.size];
       this.gaps = this.gaps.filter(([, to]) => to > oldest);
+      // N2: a candle starting before the oldest kept minute is no longer fully covered
+      this.coverFrom = Math.max(this.coverFrom, oldest);
     }
   }
 

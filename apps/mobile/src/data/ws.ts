@@ -2,11 +2,12 @@
  * Minimal Bitget PUBLIC WebSocket client (browser): ticker, books15, trade for one
  * USDT-FUTURES instrument. No auth, no keys. Auto-reconnect with backoff; "ping" every 25s and a
  * pong watchdog (no "pong" for 2 pings + 5s → reconnect).
- * Verified against a live v2 message (2026-10-06): trade pushes carry `action` "snapshot" (50
- * recent prints on subscribe) then "update"; `data` is NEWEST-FIRST; side is lowercase buy/sell.
+ * Verified against live v2 messages (2026-10-06, twice): trade pushes carry `action` "snapshot" (50
+ * recent prints on subscribe) then "update"; `data` is NEWEST-FIRST; side is lowercase buy/sell;
+ * every print has a `tradeId` (used to drop repeats, C6).
  */
 export interface WsTicker { last: number; mark: number; funding: number; change24h: number; bid: number; ask: number }
-export interface WsTrade { ts: number; price: number; qty: number; side: 'buy' | 'sell' }
+export interface WsTrade { ts: number; price: number; qty: number; side: 'buy' | 'sell'; id?: string }
 export interface WsBook { bids: Array<[number, number]>; asks: Array<[number, number]>; ts: number }
 export type WsStatus = 'connecting' | 'live' | 'reconnecting' | 'closed';
 
@@ -23,9 +24,29 @@ const URL = 'wss://ws.bitget.com/v2/ws/public';
 /** Parse a v2 `trade` push: data is newest-first on the wire → returned chronological. */
 export function parseTradePush(msg: any): { trades: WsTrade[]; snapshot: boolean } {
   const data: any[] = Array.isArray(msg?.data) ? msg.data : [];
-  const trades: WsTrade[] = data.map((r) => ({ ts: +r.ts, price: +r.price, qty: +r.size, side: r.side === 'sell' ? 'sell' : 'buy' }));
+  const trades: WsTrade[] = data.map((r) => ({ ts: +r.ts, price: +r.price, qty: +r.size, side: r.side === 'sell' ? 'sell' : 'buy', ...(r.tradeId !== undefined ? { id: String(r.tradeId) } : {}) }));
   trades.reverse();
   return { trades, snapshot: msg?.action === 'snapshot' };
+}
+
+/** C6: drops prints whose tradeId was already seen (re-sent snapshot / duplicate pushes). Bounded memory. */
+export class TradeDedupe {
+  private seen = new Set<string>();
+  constructor(private max = 5000) {}
+  filter(trades: readonly WsTrade[]): WsTrade[] {
+    const out: WsTrade[] = [];
+    for (const t of trades) {
+      if (t.id === undefined) { out.push(t); continue; }
+      if (this.seen.has(t.id)) continue;
+      this.seen.add(t.id);
+      out.push(t);
+    }
+    if (this.seen.size > this.max) {
+      let drop = this.seen.size - this.max;
+      for (const k of this.seen) { if (drop-- <= 0) break; this.seen.delete(k); } // Set keeps insertion order → oldest first
+    }
+    return out;
+  }
 }
 
 export class BitgetPublicFeed {
@@ -35,6 +56,8 @@ export class BitgetPublicFeed {
   private ping: ReturnType<typeof setInterval> | null = null;
   private lastPong = 0;
   connectedAt = 0;
+  /** local time of the last message on the current/last socket (N3: a disconnect gap starts here) */
+  lastMsgAt = 0;
 
   constructor(private symbol: string, private h: WsHandlers) {}
 
@@ -75,6 +98,7 @@ export class BitgetPublicFeed {
       this.h.status?.('live');
     };
     ws.onmessage = (ev) => {
+      this.lastMsgAt = Date.now();
       const raw = typeof ev.data === 'string' ? ev.data : '';
       if (raw === 'pong') { this.lastPong = Date.now(); return; }
       if (!raw) return;

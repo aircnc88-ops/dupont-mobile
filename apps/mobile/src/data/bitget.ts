@@ -32,9 +32,11 @@ export const GRAN: Record<string, { api: string; sec: number }> = {
   '1h': { api: '1H', sec: 3600 },
 };
 
-export async function fetchCandles(symbol: string, tf: string, limit = 300): Promise<Candle[]> {
+/** `range` (ms, N1 replay): Bitget returns the NEWEST ≤ limit bars inside [startTime, endTime]. */
+export async function fetchCandles(symbol: string, tf: string, limit = 300, range?: { startTime: number; endTime: number }): Promise<Candle[]> {
   const g = GRAN[tf] ?? GRAN['15m'];
-  const data = await getJson(`/api/v2/mix/market/candles?productType=USDT-FUTURES&symbol=${symbol}&granularity=${g.api}&limit=${limit}`);
+  const win = range ? `&startTime=${Math.floor(range.startTime)}&endTime=${Math.floor(range.endTime)}` : '';
+  const data = await getJson(`/api/v2/mix/market/candles?productType=USDT-FUTURES&symbol=${symbol}&granularity=${g.api}&limit=${limit}${win}`);
   // dedupe by open ts (last row wins), then chronological
   const byTs = new Map<number, Candle>();
   for (const r of data as string[][]) {
@@ -42,6 +44,28 @@ export async function fetchCandles(symbol: string, tf: string, limit = 300): Pro
     if (Number.isFinite(c.ts)) byTs.set(c.ts, c);
   }
   return [...byTs.values()].sort((a, b) => a.ts - b.ts);
+}
+
+/**
+ * 1-minute bars over [from, to] for the offline replay (N1), oldest first. Pages FORWARD in windows of
+ * 1000 minutes (each request returns the newest ≤1000 bars of its window); at most `maxPages` windows.
+ */
+export async function fetchMinuteBars(symbol: string, from: number, to: number, maxPages = 10): Promise<Candle[]> {
+  const W = 1000 * 60_000;
+  const out = new Map<number, Candle>();
+  for (let s = Math.floor(from / 60_000) * 60_000, k = 0; s <= to && k < maxPages; s += W, k++) {
+    const rows = await fetchCandles(symbol, '1m', 1000, { startTime: s, endTime: Math.min(to, s + W - 1) });
+    for (const c of rows) out.set(c.ts, c);
+  }
+  return [...out.values()].sort((a, b) => a.ts - b.ts);
+}
+
+/** Settled funding rates (public, no keys): fundingTime = the 00/08/16 UTC boundary ts. */
+export async function fetchFundingHistory(symbol: string, pageSize = 20): Promise<Array<{ ts: number; rate: number }>> {
+  const data = await getJson(`/api/v2/mix/market/history-fund-rate?symbol=${symbol}&productType=usdt-futures&pageSize=${pageSize}`);
+  return ((data ?? []) as Array<{ fundingRate: string; fundingTime: string }>)
+    .map((r) => ({ ts: Number(r.fundingTime), rate: Number(r.fundingRate) }))
+    .filter((x) => Number.isFinite(x.ts) && Number.isFinite(x.rate));
 }
 
 export interface TickerInfo {

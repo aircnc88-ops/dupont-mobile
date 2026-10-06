@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { fetchCandles, fetchTicker, type Candle, type TickerInfo } from './data/bitget';
-import { BitgetPublicFeed, type WsBook, type WsStatus } from './data/ws';
+import { BitgetPublicFeed, TradeDedupe, type WsBook, type WsStatus } from './data/ws';
 import { TF_MS } from './lib/symbols';
 import { TapeBuckets } from './lib/tape';
 
@@ -9,7 +9,9 @@ import { TapeBuckets } from './lib/tape';
  *  - REST candles (300, deduped by ts) refreshed every 20s; the forming candle is updated from
  *    WS trades / ticker and MERGED with REST on the boundary candle (max volume, never summed)
  *  - WS public trades aggregated on arrival into 1-minute aggressor buckets (`tape`), kept across
- *    reconnects with disconnect gaps recorded; the subscribe snapshot is skipped
+ *    reconnects with disconnect gaps recorded; the subscribe snapshot is skipped (its newest print
+ *    anchors coverage on the server clock, N4), repeats are dropped by tradeId (C6), and a gap
+ *    starts at the last message received on the dead socket (N3)
  *  - server clock offset from trade timestamps (`serverNow`) so candle-close checks do not depend
  *    on the phone clock
  *  - books15 orderbook, ticker (mark / funding / 24h)
@@ -31,21 +33,29 @@ export function useMarket(symbol: string, tf: string) {
     tape.current = new TapeBuckets();
     setBook(null);
     let dirty = false;
+    const dedupe = new TradeDedupe();
     const feed = new BitgetPublicFeed(symbol, {
       status: (s) => {
         setStatus(s);
-        if (s === 'live') tape.current.connected(Date.now() + clockOffset.current);
-        if (s === 'reconnecting' || s === 'closed') tape.current.disconnected(Date.now() + clockOffset.current);
+        // N3: the gap starts at the last message on the dead socket (a half-open socket is only noticed ~55–80 s later)
+        if (s === 'reconnecting' || s === 'closed') tape.current.disconnected((feed.lastMsgAt || Date.now()) + clockOffset.current);
       },
       ticker: (t) => setTicker((prev) => ({ ...(prev ?? t), ...t })),
       book: (b) => setBook(b),
-      trades: (ts, snapshot) => {
-        if (snapshot || !ts.length) return; // history dump: already inside the REST candle volume
-        const last = ts[ts.length - 1];
-        clockOffset.current = last.ts - Date.now();
+      trades: (raw, snapshot) => {
+        const ts = dedupe.filter(raw); // C6: repeats (by tradeId) never count twice
+        if (!raw.length) return;
+        const newest = raw[raw.length - 1];
+        clockOffset.current = newest.ts - Date.now();
+        // N4: coverage is anchored on the newest snapshot print (server clock); every later print arrives as an update.
+        // The snapshot itself is history already inside the REST candle volume → not added.
+        if (snapshot) { tape.current.connected(newest.ts); return; }
+        if (tape.current.awaitingConnect) tape.current.connected(raw[0].ts); // no snapshot seen (defensive)
+        if (!ts.length) return;
         tape.current.add(ts);
         dirty = true;
         // forming-candle update from the tape (chronological → last = newest print)
+        const last = ts[ts.length - 1];
         applyPrice(last.price, ts.reduce((s, t) => s + t.qty, 0), last.ts);
       },
     });
