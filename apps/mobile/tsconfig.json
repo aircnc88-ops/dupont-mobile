@@ -1,0 +1,22 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": false,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "baseUrl": ".",
+    "paths": {
+      "@bitget-sim/shared": ["../../packages/shared/src/index.ts"],
+      "@bitget-sim/shared/*": ["../../packages/shared/src/*"],
+      "@bitget-sim/engine/*": ["../../packages/engine/src/*"],
+      "@bitget-sim/market-data/*": ["../../packages/market-data/src/*"]
+    }
+  },
+  "include": ["src"]
+}

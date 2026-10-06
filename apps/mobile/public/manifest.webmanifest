@@ -1,0 +1,17 @@
+{
+  "name": "듀퐁 스탠다드 모의 선물",
+  "short_name": "듀퐁스탠다드",
+  "description": "Bitget USDT-M 모의 선물 – 박스권 + 압력 스캘핑 (페이퍼 트레이딩 전용)",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0b0e11",
+  "theme_color": "#0b0e11",
+  "lang": "ko",
+  "icons": [
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "icons/icon-maskable.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "name": "@bitget-sim/mobile",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host --port 5174 --strictPort",
+    "build": "vite build",
+    "preview": "vite preview --host --port 5174 --strictPort",
+    "serve": "vite build && vite preview --host --port 5174 --strictPort",
+    "test": "vitest run --config vitest.config.ts",
+    "build:pages": "MOBILE_BASE=/dupont-mobile/ MOBILE_CDN=1 vite build"
+  },
+  "dependencies": {
+    "lightweight-charts": "^4.2.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.41",
+    "tailwindcss": "^3.4.10",
+    "typescript": "^5.5.4",
+    "vite": "^5.4.2",
+    "vitest": "^2.0.5"
+  }
+}
