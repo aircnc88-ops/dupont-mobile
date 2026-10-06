@@ -3,6 +3,7 @@ import { fetchCandles, fetchTicker, type Candle, type TickerInfo } from './data/
 import { BitgetPublicFeed, TradeDedupe, type WsBook, type WsStatus } from './data/ws';
 import { TF_MS } from './lib/symbols';
 import { TapeBuckets } from './lib/tape';
+import { extendCandles, needsCandleReload } from './lib/candles';
 
 /**
  * Live market state for one symbol/timeframe:
@@ -12,6 +13,8 @@ import { TapeBuckets } from './lib/tape';
  *    reconnects with disconnect gaps recorded; the subscribe snapshot is skipped (its newest print
  *    anchors coverage on the server clock, N4), repeats are dropped by tradeId (C6), and a gap
  *    starts at the last message received on the dead socket (N3)
+ *  - R3: a print that skips one or more candles (app backgrounded / WS down) does not synthesize a
+ *    candle from the stale close (fake wick); REST is reloaded instead (throttled to 1 per 3 s)
  *  - server clock offset from trade timestamps (`serverNow`) so candle-close checks do not depend
  *    on the phone clock
  *  - books15 orderbook, ticker (mark / funding / 24h)
@@ -27,6 +30,10 @@ export function useMarket(symbol: string, tf: string) {
   const clockOffset = useRef(0);
   const tfRef = useRef(tf);
   tfRef.current = tf;
+  const candlesRef = useRef<Candle[]>([]);
+  candlesRef.current = candles;
+  const reloadRef = useRef<() => void>(() => {});
+  const freshAt = useRef(0); // server time of the newest fresh data (applied print or REST load)
 
   // WS per symbol
   useEffect(() => {
@@ -66,18 +73,12 @@ export function useMarket(symbol: string, tf: string) {
   }, [symbol]);
 
   function applyPrice(price: number, vol: number, ts: number) {
-    setCandles((prev) => {
-      if (!prev.length) return prev;
-      const ms = TF_MS[tfRef.current] ?? 900_000;
-      const start = Math.floor(ts / ms) * ms;
-      const last = prev[prev.length - 1];
-      if (start > last.ts) {
-        return [...prev.slice(-499), { ts: start, open: last.close, high: Math.max(last.close, price), low: Math.min(last.close, price), close: price, volume: vol }];
-      }
-      if (start < last.ts) return prev;
-      const nb = { ...last, close: price, high: Math.max(last.high, price), low: Math.min(last.low, price), volume: last.volume + vol };
-      return [...prev.slice(0, -1), nb];
-    });
+    const ms = TF_MS[tfRef.current] ?? 900_000;
+    // R3: one or more candles were missed (or the app slept across the boundary): never synthesize from a
+    // stale close (fake wick) — reload REST instead
+    if (needsCandleReload(candlesRef.current, ts, ms, freshAt.current)) { reloadRef.current(); return; }
+    if (candlesRef.current.length) freshAt.current = Math.max(freshAt.current, ts);
+    setCandles((prev) => extendCandles(prev, price, vol, ts, ms));
   }
 
   // REST candles per symbol/tf
@@ -89,6 +90,7 @@ export function useMarket(symbol: string, tf: string) {
         .then((c) => {
           if (!alive || !c.length) return;
           setErr('');
+          freshAt.current = Math.max(freshAt.current, Date.now() + clockOffset.current);
           setCandles((prev) => {
             if (initial || !prev.length) return c;
             const lastRest = c[c.length - 1];
@@ -105,6 +107,8 @@ export function useMarket(symbol: string, tf: string) {
         })
         .catch((e) => alive && setErr(String(e?.message ?? e)));
     load(true);
+    let lastReload = 0;
+    reloadRef.current = () => { if (Date.now() - lastReload > 3_000) { lastReload = Date.now(); load(false); } };
     const iv = setInterval(() => load(false), 20_000);
     return () => { alive = false; clearInterval(iv); };
   }, [symbol, tf]);

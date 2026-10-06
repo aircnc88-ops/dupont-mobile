@@ -46,22 +46,24 @@ export async function fetchCandles(symbol: string, tf: string, limit = 300, rang
   return [...byTs.values()].sort((a, b) => a.ts - b.ts);
 }
 
-/**
- * 1-minute bars over [from, to] for the offline replay (N1), oldest first. Pages FORWARD in windows of
- * 1000 minutes (each request returns the newest ≤1000 bars of its window); at most `maxPages` windows.
- */
-export async function fetchMinuteBars(symbol: string, from: number, to: number, maxPages = 10): Promise<Candle[]> {
+/** Bitget serves 1m `candles` only ~30 days back (probe 2026-10-06: 35 / 60 days → 0 rows). */
+export const MINUTE_HISTORY_MS = 30 * 86_400_000 - 3_600_000;
+/** 1m bars over [from, to] oldest first, paging forward in 1000-minute windows (≤ 44 sequential requests);
+ *  `from` is clamped to the endpoint's history depth — `clampedFrom` > from means the older part is not replayable. */
+export async function fetchMinuteBars(symbol: string, from: number, to: number): Promise<{ bars: Candle[]; clampedFrom: number }> {
   const W = 1000 * 60_000;
+  const start = Math.floor(Math.max(from, to - MINUTE_HISTORY_MS) / 60_000) * 60_000;
   const out = new Map<number, Candle>();
-  for (let s = Math.floor(from / 60_000) * 60_000, k = 0; s <= to && k < maxPages; s += W, k++) {
+  for (let s = start; s <= to; s += W) {
     const rows = await fetchCandles(symbol, '1m', 1000, { startTime: s, endTime: Math.min(to, s + W - 1) });
     for (const c of rows) out.set(c.ts, c);
+    if (s + W <= to) await new Promise((r) => setTimeout(r, 120)); // stay far below the public rate limit
   }
-  return [...out.values()].sort((a, b) => a.ts - b.ts);
+  return { bars: [...out.values()].sort((a, b) => a.ts - b.ts), clampedFrom: start };
 }
 
-/** Settled funding rates (public, no keys): fundingTime = the 00/08/16 UTC boundary ts. */
-export async function fetchFundingHistory(symbol: string, pageSize = 20): Promise<Array<{ ts: number; rate: number }>> {
+/** Settled funding rates (public, no keys): fundingTime = the 00/08/16 UTC boundary ts. R6: 100 records ≈ 33 days (covers the 30-day replay). */
+export async function fetchFundingHistory(symbol: string, pageSize = 100): Promise<Array<{ ts: number; rate: number }>> {
   const data = await getJson(`/api/v2/mix/market/history-fund-rate?symbol=${symbol}&productType=usdt-futures&pageSize=${pageSize}`);
   return ((data ?? []) as Array<{ fundingRate: string; fundingTime: string }>)
     .map((r) => ({ ts: Number(r.fundingTime), rate: Number(r.fundingRate) }))
