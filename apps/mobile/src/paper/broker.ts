@@ -99,6 +99,8 @@ export interface ClosedFill {
   funding?: number;
   /** netPnl / position riskUsd (R multiple of this fill) */
   r?: number;
+  /** Q5: the position's riskUsd at this fill (grows with adds) — position R = Σ net / last fill's riskUsd */
+  riskUsd?: number;
 }
 
 export interface PendingOrder {
@@ -353,7 +355,7 @@ export class PaperBroker {
     if (!(q > 0)) return null;
     // R11: settle any boundary still waiting for its settled rate before qty shrinks
     // (fallback rate = last ticker rate before the boundary) — the position WAS held at that boundary
-    this.accrueFunding(p.symbol, price, ts, 0);
+    this.accrueFunding(p.symbol, price, ts, 0, p.id); // Q2: only the closing position — others keep waiting for the settled rate
     const share = q / p.qty;
     const gross = dir(p.side) * (price - p.entry) * q;
     const exitFee = q * price * exitFeeRate;
@@ -386,6 +388,7 @@ export class PaperBroker {
       final,
       funding: fundingShare,
       r: p.riskUsd && p.riskUsd > 0 ? net / p.riskUsd : undefined,
+      riskUsd: p.riskUsd,
     };
     this.state.fills.push(fill);
     if (final) this.state.positions = this.state.positions.filter((x) => x.id !== p.id);
@@ -460,11 +463,11 @@ export class PaperBroker {
    * Rate per boundary = {@link fundingRateFor}; while the settled rate is unknown and the boundary
    * is younger than `waitMs`, charging waits (live: give the history endpoint time to publish).
    */
-  accrueFunding(symbol: string, mark: number, ts = Date.now(), waitMs = 0): BrokerEvent[] {
+  accrueFunding(symbol: string, mark: number, ts = Date.now(), waitMs = 0, onlyId?: string): BrokerEvent[] {
     const ev: BrokerEvent[] = [];
     if (!(mark > 0)) return ev;
     for (const p of this.state.positions) {
-      if (p.symbol !== symbol) continue;
+      if (p.symbol !== symbol || (onlyId !== undefined && p.id !== onlyId)) continue;
       const from = p.lastFundingTs ?? p.openedAt;
       let b = Math.floor(from / FUNDING_INTERVAL_MS) * FUNDING_INTERVAL_MS + FUNDING_INTERVAL_MS;
       let paid = 0;
@@ -498,12 +501,14 @@ export class PaperBroker {
    *  - a position is only managed by bars that start at/after its open (`openedBefore`), and only
    *    while it is open; funding is charged at the bar open for boundaries crossed;
    *  - R4: a pending limit only fills on bars that start at/after its creation;
-   *  - R5: a limit filled inside a bar whose SL lies inside that bar's range is stopped in the same bar.
+   *  - R5: a limit filled inside a bar whose SL lies inside that bar's range is stopped in the same bar
+   *    (only that position — other positions of the symbol are managed by the bar path alone);
+   *  - Q1: `nowTs` clamps the processing time of the still-forming bar (fills / lastTickTs never in the future).
    */
-  replayBars(symbol: string, bars: ReadonlyArray<{ ts: number; open: number; high: number; low: number; close: number }>): BrokerEvent[] {
+  replayBars(symbol: string, bars: ReadonlyArray<{ ts: number; open: number; high: number; low: number; close: number }>, nowTs = Infinity): BrokerEvent[] {
     const ev: BrokerEvent[] = [];
     for (const b of [...bars].sort((x, y) => x.ts - y.ts)) {
-      const t = b.ts + 59_999;
+      const t = Math.min(b.ts + 59_999, nowTs); // Q1: the in-progress bar is processed "as of now", never in the future
       ev.push(...this.accrueFunding(symbol, b.open, b.ts));
       const managed = () => this.state.positions.filter((p) => p.symbol === symbol && p.openedAt <= b.ts);
       // SL-first when the same bar spans the SL and an open TP of a position
@@ -526,7 +531,7 @@ export class PaperBroker {
       }
       // R5: a limit filled inside this bar: assume an SL touch in the same bar came after the fill (conservative, like D1)
       for (const p of this.state.positions.filter((x) => x.symbol === symbol && x.openedAt === t)) {
-        if (p.side === 'long' ? b.low <= p.sl : b.high >= p.sl) ev.push(...this.onPrice(symbol, p.sl, t));
+        if (p.side === 'long' ? b.low <= p.sl : b.high >= p.sl) this.stopOut(p, p.sl, t, ev); // this position only
       }
     }
     return ev;
@@ -560,11 +565,7 @@ export class PaperBroker {
         continue;
       }
       if (long ? price <= p.sl : price >= p.sl) {
-        const why = p.beMoved ? '본절 SL' : '손절 SL';
-        // stop-market: fills at the trigger or worse if price gapped through it, plus slippage
-        const fillPx = (long ? Math.min(p.sl, price) : Math.max(p.sl, price)) * (1 - dir(p.side) * this.slip);
-        const f = this.close(p.id, p.qty, fillPx, why, ts);
-        ev.push({ kind: 'sl', positionId: p.id, message: `${why} 체결 @ ${this.px(p.symbol, fillPx)} (순손익 ${f ? (f.netPnl >= 0 ? '+' : '') + f.netPnl.toFixed(2) : '-'} USDT)` });
+        this.stopOut(p, price, ts, ev);
         continue;
       }
       for (let k = 0; k < p.targets.length; k++) {
@@ -586,6 +587,16 @@ export class PaperBroker {
       }
     }
     return ev;
+  }
+
+  /** SL trigger of ONE position at `price`: stop-market fills at the trigger or worse if price gapped
+   *  through it, plus slippage. */
+  private stopOut(p: PaperPosition, price: number, ts: number, ev: BrokerEvent[]): void {
+    const long = p.side === 'long';
+    const why = p.beMoved ? '본절 SL' : '손절 SL';
+    const fillPx = (long ? Math.min(p.sl, price) : Math.max(p.sl, price)) * (1 - dir(p.side) * this.slip);
+    const f = this.close(p.id, p.qty, fillPx, why, ts);
+    ev.push({ kind: 'sl', positionId: p.id, message: `${why} 체결 @ ${this.px(p.symbol, fillPx)} (순손익 ${f ? (f.netPnl >= 0 ? '+' : '') + f.netPnl.toFixed(2) : '-'} USDT)` });
   }
 
   snapEquity(marks: Record<string, number>, ts = Date.now()): void {
@@ -643,7 +654,7 @@ export interface TradeStats {
 export function tradeStats(fills: ClosedFill[], openIds: Iterable<string> = []): TradeStats {
   // partial closes of still-open positions count toward net PnL but not toward trade count / win rate
   const open = new Set(openIds);
-  const byPos = new Map<string, { net: number; r: number; hasR: boolean }>();
+  const byPos = new Map<string, { net: number; r: number; hasR: boolean; risk: number }>();
   let fees = 0;
   let partialNet = 0;
   let funding = 0;
@@ -651,10 +662,13 @@ export function tradeStats(fills: ClosedFill[], openIds: Iterable<string> = []):
     fees += f.fees;
     funding += f.funding ?? 0;
     if (open.has(f.positionId)) { partialNet += f.netPnl; continue; }
-    const x = byPos.get(f.positionId) ?? { net: 0, r: 0, hasR: true };
+    // Q5: one R denominator per position — Σ net / the LAST fill's riskUsd (adds raise riskUsd);
+    // legacy fills without riskUsd fall back to summing their per-fill R
+    const x = byPos.get(f.positionId) ?? { net: 0, r: 0, hasR: true, risk: 0 };
     x.net += f.netPnl;
     if (f.r === undefined) x.hasR = false;
-    else x.r += f.r;
+    if (f.riskUsd) x.risk = f.riskUsd;
+    x.r = x.risk > 0 ? x.net / x.risk : x.r + (f.r ?? 0);
     byPos.set(f.positionId, x);
   }
   const results = [...byPos.values()];
@@ -679,10 +693,20 @@ export function tradeStats(fills: ClosedFill[], openIds: Iterable<string> = []):
   };
 }
 
-/** Sum of R over positions whose FINAL fill closed at/after `since` (for the daily auto-paper stop). */
+/** Sum of R over positions whose FINAL fill closed at/after `since` (for the daily auto-paper stop).
+ *  Q5: per position R = Σ net of its fills / its last fill's riskUsd (same rule as {@link tradeStats}). */
 export function realizedRSince(fills: ClosedFill[], since: number): number {
   const finals = new Set(fills.filter((f) => f.final && f.closedAt >= since).map((f) => f.positionId));
-  return fills.filter((f) => finals.has(f.positionId)).reduce((s, f) => s + (f.r ?? 0), 0);
+  const byPos = new Map<string, { net: number; r: number; risk: number }>();
+  for (const f of fills) {
+    if (!finals.has(f.positionId)) continue;
+    const x = byPos.get(f.positionId) ?? { net: 0, r: 0, risk: 0 };
+    x.net += f.netPnl;
+    if (f.riskUsd) x.risk = f.riskUsd;
+    x.r = x.risk > 0 ? x.net / x.risk : x.r + (f.r ?? 0);
+    byPos.set(f.positionId, x);
+  }
+  return [...byPos.values()].reduce((s, x) => s + x.r, 0);
 }
 
 export function fillsToCsv(fills: ClosedFill[]): string {
