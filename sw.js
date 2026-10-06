@@ -1,6 +1,6 @@
 /* Dupont Standard PWA service worker — base-path aware (works at / and /dupont-mobile/).
    App-shell cache; live market data is never cached. */
-const CACHE = 'dupont-mobile-v2';
+const CACHE = 'dupont-mobile-v3';
 const BASE = new URL('./', self.location).pathname; // e.g. "/dupont-mobile/"
 const SHELL = [BASE, BASE + 'index.html', BASE + 'manifest.webmanifest', BASE + 'icons/icon.svg'];
 
