@@ -351,6 +351,9 @@ export class PaperBroker {
     if (!p) return null;
     const q = Math.min(qty, p.qty);
     if (!(q > 0)) return null;
+    // R11: settle any boundary still waiting for its settled rate before qty shrinks
+    // (fallback rate = last ticker rate before the boundary) — the position WAS held at that boundary
+    this.accrueFunding(p.symbol, price, ts, 0);
     const share = q / p.qty;
     const gross = dir(p.side) * (price - p.entry) * q;
     const exitFee = q * price * exitFeeRate;
@@ -433,7 +436,8 @@ export class PaperBroker {
     const m = (all[symbol] ??= {});
     for (const x of list) if (Number.isFinite(x.ts) && Number.isFinite(x.rate)) m[String(x.ts)] = x.rate;
     const keys = Object.keys(m).map(Number).sort((a, b) => a - b);
-    for (const k of keys.slice(0, Math.max(0, keys.length - 60))) delete m[String(k)];
+    // keep 100 boundaries (≈33 days of 8 h funding) so the 30-day replay (R2/R6) has settled rates throughout
+    for (const k of keys.slice(0, Math.max(0, keys.length - 100))) delete m[String(k)];
   }
 
   /**
@@ -492,7 +496,9 @@ export class PaperBroker {
    *  - otherwise levels are processed in path order (green bar: open→low→high→close, red bar:
    *    open→high→low→close), every crossed SL / liquidation / TP level at its exact price;
    *  - a position is only managed by bars that start at/after its open (`openedBefore`), and only
-   *    while it is open; funding is charged at the bar open for boundaries crossed.
+   *    while it is open; funding is charged at the bar open for boundaries crossed;
+   *  - R4: a pending limit only fills on bars that start at/after its creation;
+   *  - R5: a limit filled inside a bar whose SL lies inside that bar's range is stopped in the same bar.
    */
   replayBars(symbol: string, bars: ReadonlyArray<{ ts: number; open: number; high: number; low: number; close: number }>): BrokerEvent[] {
     const ev: BrokerEvent[] = [];
@@ -518,6 +524,10 @@ export class PaperBroker {
           .sort((x, y) => (z > a ? x - y : y - x));
         for (const px of [...lv, z]) ev.push(...this.onPrice(symbol, px, t, undefined, b.ts));
       }
+      // R5: a limit filled inside this bar: assume an SL touch in the same bar came after the fill (conservative, like D1)
+      for (const p of this.state.positions.filter((x) => x.symbol === symbol && x.openedAt === t)) {
+        if (p.side === 'long' ? b.low <= p.sl : b.high >= p.sl) ev.push(...this.onPrice(symbol, p.sl, t));
+      }
     }
     return ev;
   }
@@ -530,7 +540,7 @@ export class PaperBroker {
     const lt = (this.state.lastTickTs ??= {});
     lt[symbol] = Math.max(lt[symbol] ?? 0, ts);
     for (const o of [...this.state.pending]) {
-      if (o.symbol !== symbol) continue;
+      if (o.symbol !== symbol || o.createdAt > openedBefore) continue; // R4 replay: the order must exist before the bar
       const hit = o.side === 'long' ? price <= o.price : price >= o.price;
       if (!hit) continue;
       this.state.pending = this.state.pending.filter((x) => x.id !== o.id);
