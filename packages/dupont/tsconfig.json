@@ -1,0 +1,17 @@
+{
+  // Package-local strict typecheck. `@bitget-sim/shared` is only used for TYPE imports
+  // (Candle, PublicTrade), so it is mapped to its types module here to keep this check
+  // independent of unrelated pre-existing errors elsewhere in shared. The root tsconfig
+  // (which includes packages/*/src) still checks this package against the full barrel.
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "strict": true,
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@bitget-sim/shared": ["../shared/src/types.ts"]
+    }
+  },
+  "include": ["src", "tests"],
+  "exclude": ["node_modules", "dist"]
+}

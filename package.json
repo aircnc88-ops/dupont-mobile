@@ -1,11 +1,11 @@
 {
   "name": "dupont-mobile-root",
   "private": true,
-  "workspaces": ["apps/*"],
+  "workspaces": ["apps/*", "packages/*"],
   "scripts": {
     "dev": "npm run dev -w @bitget-sim/mobile",
     "build": "npm run build -w @bitget-sim/mobile",
     "build:pages": "npm run build:pages -w @bitget-sim/mobile",
-    "test": "npm run test -w @bitget-sim/mobile"
+    "test": "npm run test -w @bitget-sim/dupont && npm run test -w @bitget-sim/mobile"
   }
 }
