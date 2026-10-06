@@ -95,7 +95,7 @@ close:N.close}))),c.current!==e.viewKey&&(a.current=!1),a.current||(c.current=e.
 length-80,to:e.candles.length+4}),a.current=!0),requestAnimationFrame(()=>h(!0))}},[e.candles,e.dp]),J(()=>{const b=r.current;if(!b)return;for(const x of s.current)
 b.removePriceLine(x);s.current=[];const w=(x,v,F,R=we.Solid,k=1)=>s.current.push(b.createPriceLine({price:x,color:v,title:F,lineStyle:R,lineWidth:k,axisLabelVisible:!0}));
 e.box&&(w(Number(e.box.top),"#00c2cb","저항"),w(Number(e.box.bottom),"#00c2cb","지지"),w(Number(e.box.mid),"#f6465d","50%",we.Dashed));for(const x of e.positions){
-w(x.entry,"#eaecef",x.side==="long"?"롱 진입":"솟 진입",we.Dotted),w(x.sl,"#f0b90b",x.beMoved?"SL(본절)":"SL",we.Dashed);for(const v of x.targets)v.done||
+w(x.entry,"#eaecef",x.side==="long"?"롱 진입":"숏 진입",we.Dotted),w(x.sl,"#f0b90b",x.beMoved?"SL(본절)":"SL",we.Dashed);for(const v of x.targets)v.done||
 w(v.price,"#2ebd85",v.label.split(" ")[0],we.Dashed)}const N=e.signals.map(x=>({time:x.ts/1e3,position:x.side==="long"?"belowBar":"aboveBar",color:x.side==="lon\
 g"?"#2ebd85":"#f6465d",shape:x.side==="long"?"arrowUp":"arrowDown",text:Bt[x.type.split("_")[0]]??""})).sort((x,v)=>x.time-v.time);b.setMarkers(N),requestAnimationFrame(
 ()=>h(!0))},[e.box,e.positions,e.signals]),J(()=>{requestAnimationFrame(()=>h(!0))},[e.pressures,e.showHist,e.editBox]),J(()=>{const b=l.current;b&&b.applyOptions(
@@ -189,7 +189,7 @@ qty,m.margin+=a,m.entryFeeLeft+=s,m.adds+=1,m.liqPrice=et(m.side,m.entry,m.lever
 t.symbol,t.qty)} @ ${this.px(t.symbol,t.price)}`}),this.snapEquity({[t.symbol]:t.price},n),{ok:!0,position:m,events:i}}const u={id:this.nextId("p"),symbol:t.symbol,
 side:t.side,qty:t.qty,origQty:t.qty,entry:t.price,leverage:t.leverage,margin:a,sl:t.sl,initialSl:t.sl,targets:t.targets.map(p=>({...p,done:!1})),setup:t.setup,signalId:t.
 signalId,breakoutLevel:t.breakoutLevel,adds:0,entryFeeLeft:s,realizedNet:0,beMoved:!1,liqPrice:et(t.side,t.price,t.leverage,c),mmr:c,openedAt:n};return this.state.
-positions.push(u),i.push({kind:"open",positionId:u.id,message:`${t.side==="long"?"롱":"솟"} 진입 ${this.qx(t.symbol,t.qty)} ${t.symbol} @ ${this.px(t.symbol,
+positions.push(u),i.push({kind:"open",positionId:u.id,message:`${t.side==="long"?"롱":"숏"} 진입 ${this.qx(t.symbol,t.qty)} ${t.symbol} @ ${this.px(t.symbol,
 t.price)}`}),this.snapEquity({[t.symbol]:t.price},n),{ok:!0,position:u,events:i}}placeLimit(t,n=Date.now()){return t.qty*t.price/t.leverage>this.available()?{ok:!1,
 error:"증거금 부족"}:(this.state.pending.push({...t,id:this.nextId("o"),createdAt:n}),{ok:!0})}cancelLimit(t){this.state.pending=this.state.pending.filter(
 n=>n.id!==t)}close(t,n,i,l,r=Date.now()){const s=this.state.positions.find(q=>q.id===t);if(!s)return null;const a=Math.min(n,s.qty);if(!(a>0))return null;const c=pt(
@@ -199,7 +199,7 @@ reason:l,openedAt:s.openedAt,closedAt:r,final:S};return this.state.fills.push(f)
 {[s.symbol]:i},r),f}closeFraction(t,n,i,l,r=Date.now()){const s=this.state.positions.find(a=>a.id===t);return s?this.close(t,n>=1?s.qty:s.qty*n,i,l,r):null}onPrice(t,n,i=Date.
 now()){var r;const l=[];for(const s of[...this.state.pending]){if(s.symbol!==t||!(s.side==="long"?n<=s.price:n>=s.price))continue;this.state.pending=this.state.
 pending.filter(m=>m.id!==s.id);const c=this.open({...s,liquidity:"maker"},i);c.ok?l.push({kind:"limit_fill",positionId:(r=c.position)==null?void 0:r.id,message:`\
-지정가 체결 ${s.side==="long"?"롱":"솟"} @ ${this.px(s.symbol,s.price)}`}):l.push({kind:"close",message:`지정가 체결 실패: ${c.error}`})}for(const s of[
+지정가 체결 ${s.side==="long"?"롱":"숏"} @ ${this.px(s.symbol,s.price)}`}):l.push({kind:"close",message:`지정가 체결 실패: ${c.error}`})}for(const s of[
 ...this.state.positions]){if(s.symbol!==t)continue;const a=s.side==="long";if(s.liqPrice>0&&(a?n<=s.liqPrice:n>=s.liqPrice)){this.close(s.id,s.qty,s.liqPrice,"강\
 제청산",i),l.push({kind:"liq",positionId:s.id,message:`강제청산 @ ${this.px(s.symbol,s.liqPrice)}`});continue}if(a?n<=s.sl:n>=s.sl){const c=s.beMoved?"본절\
  SL":"손절 SL",m=a?Math.min(s.sl,n):Math.max(s.sl,n),u=this.close(s.id,s.qty,m,c,i);l.push({kind:"sl",positionId:s.id,message:`${c} 체결 @ ${this.px(s.symbol,
@@ -218,8 +218,8 @@ join(","));return[t.join(","),...n].join(`
 t.label}))}function on(e,t){try{const n=localStorage.getItem(e);return n?{...t,...JSON.parse(n)}:t}catch{return t}}function qe(e){try{const t=localStorage.getItem(
 e);return t?JSON.parse(t):null}catch{return null}}function me(e,t){try{t==null?localStorage.removeItem(e):localStorage.setItem(e,JSON.stringify(t))}catch{}}const rn={
 symbol:"BTCUSDT",tf:"15m",riskPct:1,leverage:10,autoPaper:!1,moveSlToBe:!0,maxAdds:2,addSizePct:50,lookback:80,tolerancePct:.25,pivotLeft:3,pivotRight:3,minTouches:2,
-requireRange:!0,notify:!1,showHist:!0},ln=["차트","거래","포지션","기록","설정"],Te={RANGE_LONG:"박스 반전 롱",RANGE_SHORT:"박스 반전 솟",FAKE_BREAKOUT_LONG:"\
-가짜 이탈 롱",FAKE_BREAKOUT_SHORT:"가짜 돌파 솟",BREAKOUT_LONG:"진짜 돌파 롱",BREAKOUT_SHORT:"진짜 이탈 솟"},gt=e=>e==="MANUAL"?"수동":Te[e]??
+requireRange:!0,notify:!1,showHist:!0},ln=["차트","거래","포지션","기록","설정"],Te={RANGE_LONG:"박스 반전 롱",RANGE_SHORT:"박스 반전 숏",FAKE_BREAKOUT_LONG:"\
+가짜 이탈 롱",FAKE_BREAKOUT_SHORT:"가짜 돌파 숏",BREAKOUT_LONG:"진짜 돌파 롱",BREAKOUT_SHORT:"진짜 이탈 숏"},gt=e=>e==="MANUAL"?"수동":Te[e]??
 e,tt="dupont.broker.v1",nt="dupont.settings.v1",Me="dupont.seen.v1";function an(e,t){const n=e.level?D(e.level,t):"";return e.add?`돌파 레벨 ${n} 리테스트 확인 – \
 추가 진입 가능`:e.reason.startsWith("max adds")?"최대 추가 횟수 도달":e.reason.startsWith("no retest")?`돌파 레벨 ${n} 리테스트 대기`:e.
 reason.startsWith("retest without")?"리테스트 중 – 장악형/압력 확인 대기":e.reason.startsWith("no broken")?"돌파 레벨 정보 없음":e.reason.
@@ -283,8 +283,8 @@ mn,{s:n,set:l,last:x,dp:r.dp,book:s.book,equity:k,available:L,qtyStep:r.qtyStep,
 o.sl),B=o.kind==="breakout"||!o.tp2?[{price:Number(o.tp1),fraction:1,label:"TP 1:3"}]:[{price:Number(o.tp1),fraction:.5,label:"TP1 중앙선"},{price:Number(o.tp2),
 fraction:.5,label:"TP2 반대편"}],I=((X=o.signal)==null?void 0:X.type)??"MANUAL",G=o.kind==="breakout"&&p.box?Number(o.side==="long"?p.box.top:p.box.bottom):void 0;
 if(y==="limit"){const V=h.current.placeLimit({symbol:n.symbol,side:o.side,qty:P,price:M,leverage:n.leverage,sl:C,targets:B,setup:I,breakoutLevel:G});N(V.ok?`지정가\
- ${o.side==="long"?"롱":"솟"} 주문 ${D(P,r.qdp)} @ ${D(M,r.dp)}`:V.error??"주문 실패",V.ok?"up":"down")}else{const V=h.current.open({symbol:n.symbol,side:o.
-side,qty:P,price:x,leverage:n.leverage,sl:C,targets:B,setup:I,breakoutLevel:G,signalId:o.signal?U(o.signal):void 0});N(V.ok?`${o.side==="long"?"롱":"솟"} 모의 진\
+ ${o.side==="long"?"롱":"숏"} 주문 ${D(P,r.qdp)} @ ${D(M,r.dp)}`:V.error??"주문 실패",V.ok?"up":"down")}else{const V=h.current.open({symbol:n.symbol,side:o.
+side,qty:P,price:x,leverage:n.leverage,sl:C,targets:B,setup:I,breakoutLevel:G,signalId:o.signal?U(o.signal):void 0});N(V.ok?`${o.side==="long"?"롱":"숏"} 모의 진\
 입 ${D(P,r.qdp)} @ ${D(x,r.dp)}`:V.error??"진입 실패",V.ok?"up":"down"),o.signal&&($.current.add(U(o.signal)),me(Me,[...$.current].slice(-300)))}q()}},n.symbol),
 e==="포지션"&&g("div",{className:"flex-1 overflow-y-auto p-3 space-y-3",children:[g(ne,{className:"p-3",children:[d(Q,{k:"자산 (Equity)",v:`${D(k)} USDT`}),
 d(Q,{k:"가용",v:`${D(L)} USDT`}),d(Q,{k:"미실현 손익 (순, 지금 청산 시)",v:(()=>{const o=R.positions.reduce((M,P)=>{const C=v[P.symbol]??P.entry;return M+
@@ -292,7 +292,7 @@ Ue(P,C)-P.entryFeeLeft-C*P.qty*re},0),y=Number(o.toFixed(2));return g("span",{cl
 positions.length&&d("div",{className:"text-muted text-sm text-center py-8",children:"보유 포지션 없음"}),R.positions.map(o=>{var B;const y=le.find(I=>I.p.
 id===o.id),M=v[o.symbol]??o.entry,P=Ue(o,M)-o.entryFeeLeft-M*o.qty*re,C=ee(o.symbol).dp;return g(ne,{className:"p-3",children:[g("div",{className:"flex justify-\
 between items-center mb-1",children:[g("div",{className:"font-semibold",children:[d("span",{className:o.side==="long"?"text-up":"text-down",children:o.side==="l\
-ong"?"롱":"솟"})," ",o.symbol," ",g("span",{className:"text-muted text-xs",children:[o.leverage,"x · ",gt(o.setup)]})]}),g("div",{className:"text-right",children:[
+ong"?"롱":"숏"})," ",o.symbol," ",g("span",{className:"text-muted text-xs",children:[o.leverage,"x · ",gt(o.setup)]})]}),g("div",{className:"text-right",children:[
 g("div",{className:`num font-semibold ${P>=0?"text-up":"text-down"}`,children:[ge(P)," USDT"]}),d("div",{className:"text-[10px] text-muted",children:"지금 청산 시 순손\
 익"})]})]}),d(Q,{k:"수량 / 진입가",v:`${D(o.qty,ee(o.symbol).qdp)} / ${D(o.entry,C)}`}),d(Q,{k:"마크 / 청산가",v:`${D(M,C)} / ${D(o.liqPrice,C)}`}),d(
 Q,{k:`SL${o.beMoved?" (본절)":""}`,v:D(o.sl,C)}),o.targets.map((I,G)=>d(Q,{k:I.label,v:g("span",{className:I.done?"text-up":"",children:[D(I.price,C)," · ",Math.
@@ -304,7 +304,7 @@ n.maxAdds,"회)"]}),g("div",{className:"grid grid-cols-3 gap-2 mt-3",children:[d
 d(ie,{onClick:()=>ve(o,.5,"50% 청산"),children:"50% 청산"}),d(ie,{tone:"accent",disabled:!((B=y==null?void 0:y.pyr)!=null&&B.add)||o.adds>=n.maxAdds||o.symbol!==
 n.symbol,onClick:()=>(y==null?void 0:y.pyr)&&Ne(o,y.pyr),children:"불타기"})]})]},o.id)}),R.pending.length>0&&g(ne,{className:"p-3",children:[d("div",{className:"\
 text-sm font-semibold mb-1",children:"미체결 지정가"}),R.pending.map(o=>g("div",{className:"flex justify-between items-center py-1 text-[13px]",children:[
-g("span",{className:o.side==="long"?"text-up":"text-down",children:[o.side==="long"?"롱":"솟"," ",o.symbol," ",D(o.qty,ee(o.symbol).qdp)," @ ",D(o.price,ee(o.
+g("span",{className:o.side==="long"?"text-up":"text-down",children:[o.side==="long"?"롱":"숏"," ",o.symbol," ",D(o.qty,ee(o.symbol).qdp)," @ ",D(o.price,ee(o.
 symbol).dp)]}),d("button",{className:"text-muted underline",onClick:()=>{h.current.cancelLimit(o.id),q()},children:"취소"})]},o.id))]})]}),e==="기록"&&d(hn,
 {broker:h.current}),e==="설정"&&g("div",{className:"flex-1 overflow-y-auto p-3 space-y-3",children:[g(ne,{className:"p-3",children:[d("div",{className:"text-s\
 m font-semibold mb-2",children:"자금"}),d(Q,{k:"시드 / 지갑",v:`${D(R.bankroll)} / ${D(R.wallet)} USDT`}),d(ie,{tone:"down",className:"w-full mt-2",onClick:()=>{
@@ -346,7 +346,7 @@ ratio*100),"%"]})]}),g("div",{className:"grid grid-cols-4 gap-1 text-[11px] num 
 D(e.entry,t)]}),g("div",{children:[d("div",{className:"text-muted",children:"SL"}),d("span",{className:"text-warn",children:D(e.sl,t)})]}),e.targets.map(s=>g("d\
 iv",{children:[g("div",{className:"text-muted",children:[s.label," ",s.sizePct,"%"]}),d("span",{className:"text-up",children:D(s.price,t)})]},s.label))]}),g("di\
 v",{className:"flex gap-2 mt-2",children:[d(ie,{tone:r?"up":"down",className:"flex-1 h-10",disabled:n,onClick:i,children:n?"진입 완료/처리됨":`탭하여 모의 ${r?
-"롱":"솟"} 진입`}),d(ie,{className:"h-10",onClick:l,children:"수정"})]})]})}function mn(e){const[t,n]=E("market"),[i,l]=E(""),[r,s]=E(""),a=e.draft??e.defaultDraft(
+"롱":"숏"} 진입`}),d(ie,{className:"h-10",onClick:l,children:"수정"})]})]})}function mn(e){const[t,n]=E("market"),[i,l]=E(""),[r,s]=E(""),a=e.draft??e.defaultDraft(
 "long");J(()=>{!e.draft&&e.last&&e.setDraft(e.defaultDraft("long"))},[e.last>0]);const c=t==="limit"&&Number(i)>0?Number(i):e.last,m=Number(a.sl);let u=null;try{
 u=c>0&&m>0&&m!==c?e.sizeFor(c,m):null}catch{u=null}const p=Math.max(0,Math.round(-Math.log10(e.qtyStep))),h=r?ut(Number(r)||0,e.qtyStep):Number((u==null?void 0:
 u.qty)??0),S=a.side==="long",f=Number(a.tp1),q=Number(a.tp2),b=S?m<c:m>c,w=f>0&&(S?f>c:f<c)&&(a.kind==="breakout"||!a.tp2||(S?q>f:q<f)),N=h*c,x=N>=ye,v=N/e.s.leverage,
@@ -355,7 +355,7 @@ F=t==="limit"?ht:re,R=Math.abs(c-m)*h+c*h*F+m*h*re,k=b&&w&&x&&v+c*h*F<=e.availab
 ...$});return g("div",{className:"flex-1 overflow-y-auto px-3 pt-3",children:[g("div",{className:"grid grid-cols-[minmax(0,1fr)_124px] gap-2.5",children:[g("div",
 {className:"space-y-2.5",children:[d("div",{className:"grid grid-cols-2 gap-1 bg-panel2 rounded-lg p-1",children:["long","short"].map($=>d("button",{onClick:()=>{
 s(""),e.setDraft(a.signal&&a.side===$?a:e.defaultDraft($))},className:`h-9 rounded-md font-semibold text-sm ${a.side===$?$==="long"?"bg-up text-white":"bg-down \
-text-white":"text-muted"}`,children:$==="long"?"롱":"솟"},$))}),d(Ce,{items:["market","limit"],value:t,onChange:$=>n($),fmt:$=>$==="market"?"시장가":"지정가"}),
+text-white":"text-muted"}`,children:$==="long"?"롱":"숏"},$))}),d(Ce,{items:["market","limit"],value:t,onChange:$=>n($),fmt:$=>$==="market"?"시장가":"지정가"}),
 t==="limit"&&d(H,{label:"지정가",value:i,onChange:l}),g("div",{children:[d("span",{className:"text-[11px] text-muted",children:"레버리지"}),d(Ce,{items:[
 3,5,10,20],value:e.s.leverage,onChange:$=>e.set({leverage:$}),fmt:$=>`${$}x`})]}),d(H,{label:"리스크 (자산 대비)",value:String(e.s.riskPct),onChange:$=>{
 s(""),e.set({riskPct:Math.max(.1,Number($)||1)})},suffix:"%"}),d(H,{label:"손절 SL",value:String(a.sl),onChange:$=>A({sl:$})}),d(H,{label:a.kind==="breakout"?
@@ -369,7 +369,7 @@ text-down",children:["-",D(R)," USDT (",(R/Math.max(e.equity,1e-9)*100).toFixed(
 (f+q)*h*.5*re)-c*h*F)," USDT"]})}),d(Q,{k:"가용 / 자산",v:`${D(e.available)} / ${D(e.equity)} USDT`})]}),g("div",{className:"sticky bottom-0 -mx-3 px-3 pt-2\
  pb-3 mt-1 bg-bg/95 backdrop-blur border-t border-line",children:[!k&&h>0&&d("div",{className:"text-[11px] text-down mb-1",children:L}),d(ie,{tone:a.side==="lon\
 g"?"up":"down",className:"w-full h-12 text-[16px]",disabled:!k||!(h>0),onClick:()=>{e.onSubmit(a,t,c,h),s("")},children:a.side==="long"?"롱 (매수) 모의 진입":
-"솟 (매도) 모의 진입"})]})]})}function hn({broker:e}){var p,h,S;const t=e.state,n=en(t.fills,t.positions.map(f=>f.id)),i=t.equityCurve,l=360,r=120,s=i.map(
+"숏 (매도) 모의 진입"})]})]})}function hn({broker:e}){var p,h,S;const t=e.state,n=en(t.fills,t.positions.map(f=>f.id)),i=t.equityCurve,l=360,r=120,s=i.map(
 f=>f.equity),a=Math.min(...s,t.bankroll),c=Math.max(...s,t.bankroll),m=i.map((f,q)=>`${q?"L":"M"}${q/Math.max(1,i.length-1)*l},${r-(f.equity-a)/Math.max(1e-9,c-
 a)*(r-10)-5}`).join(" "),u=async()=>{var N;const f=tn(t.fills),q=`dupont-paper-${new Date().toISOString().slice(0,10)}.csv`,b=new File([f],q,{type:"text/csv"});
 if((N=navigator.canShare)!=null&&N.call(navigator,{files:[b]}))try{await navigator.share({files:[b],title:q});return}catch{}const w=document.createElement("a");
@@ -385,7 +385,7 @@ g("span",{children:[D(((p=i[0])==null?void 0:p.equity)??t.bankroll)," → ",d("s
 0px]",children:[d("line",{x1:"0",x2:l,y1:r-(t.bankroll-a)/Math.max(1e-9,c-a)*(r-10)-5,y2:r-(t.bankroll-a)/Math.max(1e-9,c-a)*(r-10)-5,stroke:"#262e38",strokeDasharray:"\
 4 4"}),d("path",{d:m,fill:"none",stroke:"#00c2cb",strokeWidth:"2"})]})]}),d(ie,{className:"w-full",onClick:u,disabled:!t.fills.length,children:"CSV 내보내기"}),
 [...t.fills].reverse().map(f=>g(ne,{className:"p-3",children:[g("div",{className:"flex justify-between text-[13px]",children:[g("span",{children:[d("span",{className:f.
-side==="long"?"text-up":"text-down",children:f.side==="long"?"롱":"솟"})," ",f.symbol," · ",gt(f.setup)]}),g("span",{className:`num font-semibold ${f.netPnl>=
+side==="long"?"text-up":"text-down",children:f.side==="long"?"롱":"숏"})," ",f.symbol," · ",gt(f.setup)]}),g("span",{className:`num font-semibold ${f.netPnl>=
 0?"text-up":"text-down"}`,children:[ge(f.netPnl)," USDT"]})]}),g("div",{className:"text-[11px] text-muted num mt-0.5",children:[Ee(f.closedAt)," · ",f.reason,"\
  · ",D(f.qty,ee(f.symbol).qdp)," · ",D(f.entry,ee(f.symbol).dp)," → ",D(f.exit,ee(f.symbol).dp)," · 수수료 ",D(f.fees,3)]})]},f.id)),!t.fills.length&&d(
 "div",{className:"text-muted text-sm text-center py-6",children:"거래 기록 없음"})]})}vt.createRoot(document.getElementById("root")).render(d(cn,{}));if("\
