@@ -72,6 +72,10 @@ export interface PaperPosition {
   fundingAcc?: number;
   /** last funding boundary charged */
   lastFundingTs?: number;
+  /** qty of the first fill (N6: base for pyramid add sizing) */
+  initialQty?: number;
+  /** A3 / owner decision 5: risk budget fixed at entry (wallet × risk% at open); adds keep the combined loss at SL within it */
+  riskBudget?: number;
 }
 
 export interface ClosedFill {
@@ -109,6 +113,8 @@ export interface PendingOrder {
   setup: SetupKind;
   signalId?: string;
   breakoutLevel?: number;
+  /** risk budget captured when the order was placed (becomes the position's riskBudget on fill) */
+  riskBudget?: number;
   createdAt: number;
 }
 
@@ -120,6 +126,12 @@ export interface BrokerState {
   pending: PendingOrder[];
   equityCurve: Array<{ t: number; equity: number }>;
   seq: number;
+  /** ts of the last price processed per symbol (live tick or offline replay) — N1 */
+  lastTickTs?: Record<string, number>;
+  /** ticker funding rates seen per symbol as [ts, rate] (appended on change / new period) — N5 fallback */
+  rateSeen?: Record<string, Array<[number, number]>>;
+  /** settled funding rates per symbol keyed by boundary ts (Bitget history-fund-rate) — N5 primary */
+  settledRates?: Record<string, Record<string, number>>;
 }
 
 export interface OpenArgs {
@@ -141,6 +153,8 @@ export interface OpenArgs {
   candleTs?: number;
   /** market reference price (ask for longs / bid for shorts) before slippage; default `price` */
   refPx?: number;
+  /** risk budget (USDT) fixed for the position at entry; adds are rejected when the combined loss at SL would exceed it */
+  riskBudget?: number;
 }
 
 export interface BrokerEvent {
@@ -163,6 +177,16 @@ export function upnl(p: PaperPosition, mark: number): number {
 function liqOf(side: Side, entry: number, leverage: number, mmr: number): number {
   const inv = 1 / (leverage || 1);
   return side === 'long' ? entry * (1 - inv + mmr) : entry * (1 + inv - mmr);
+}
+
+/**
+ * Combined loss at `newSl` (USDT, signed: negative = SL already in profit) if `addQty` is added at `fill`:
+ * price distance on the averaged entry + leftover entry fees + the add's taker entry fee + taker exit fee + stop slippage.
+ */
+export function lossAtSlAfterAdd(p: Pick<PaperPosition, 'side' | 'qty' | 'entry' | 'entryFeeLeft'>, addQty: number, fill: number, newSl: number, slip = SLIP, addFeeRate = TAKER_FEE): number {
+  const nq = p.qty + addQty;
+  const avg = (p.entry * p.qty + fill * addQty) / nq;
+  return dir(p.side) * (avg - newSl) * nq + p.entryFeeLeft + addQty * fill * addFeeRate + nq * newSl * (TAKER_FEE + slip);
 }
 
 /** Planned loss at SL (USDT) for `qty` filled at `fill`: price distance + entry fee + taker exit fee + stop slippage. */
@@ -204,6 +228,9 @@ export class PaperBroker {
       p.fundingAcc ??= 0;
       p.riskUsd ??= plannedRisk(p.side, p.entry, p.initialSl, p.origQty, p.origQty * p.entry * TAKER_FEE);
     }
+    this.state.lastTickTs ??= {};
+    this.state.rateSeen ??= {};
+    this.state.settledRates ??= {};
   }
 
   private nextId(prefix: string): string {
@@ -250,6 +277,10 @@ export class PaperBroker {
       const sl = long ? Math.max(existing.sl, a.sl) : Math.min(existing.sl, a.sl); // an add never loosens the stop
       const liq = liqOf(existing.side, avg, existing.leverage, existing.mmr);
       if (long ? sl <= liq : sl >= liq) return { ok: false, error: 'SL이 청산가 밖 (추가 후 청산가 기준)', events };
+      // A3 / owner decision 5: combined loss at the (never loosened) SL must stay within the budget fixed at entry
+      if (existing.riskBudget !== undefined && lossAtSlAfterAdd(existing, a.qty, fillPx, sl, this.slip, feeRate) > existing.riskBudget + 1e-9) {
+        return { ok: false, error: `추가 시 총 리스크가 진입 시 예산(${existing.riskBudget.toFixed(2)} USDT) 초과`, events };
+      }
       this.state.wallet -= fee;
       existing.entry = avg;
       existing.qty = newQty;
@@ -293,6 +324,8 @@ export class PaperBroker {
       initialEntry: fillPx,
       riskUsd: plannedRisk(a.side, fillPx, a.sl, a.qty, fee),
       fundingAcc: 0,
+      initialQty: a.qty,
+      riskBudget: a.riskBudget,
     };
     this.state.positions.push(pos);
     events.push({ kind: 'open', positionId: pos.id, message: `${a.side === 'long' ? '롱' : '숏'} 진입 ${this.qx(a.symbol, a.qty)} ${a.symbol} @ ${this.px(a.symbol, fillPx)}` });
@@ -313,14 +346,14 @@ export class PaperBroker {
 
   /** Close `qty` of a position at `price` (already the execution price). Fees: taker per Bitget swap profile
    *  (TP exits too — conservative). Funding accrued since the last close is attributed pro rata. */
-  close(positionId: string, qty: number, price: number, reason: string, ts = Date.now()): ClosedFill | null {
+  close(positionId: string, qty: number, price: number, reason: string, ts = Date.now(), exitFeeRate = TAKER_FEE): ClosedFill | null {
     const p = this.state.positions.find((x) => x.id === positionId);
     if (!p) return null;
     const q = Math.min(qty, p.qty);
     if (!(q > 0)) return null;
     const share = q / p.qty;
     const gross = dir(p.side) * (price - p.entry) * q;
-    const exitFee = q * price * TAKER_FEE;
+    const exitFee = q * price * exitFeeRate;
     const entryFeeShare = p.entryFeeLeft * share;
     const marginShare = p.margin * share;
     const fundingShare = (p.fundingAcc ?? 0) * share;
@@ -374,40 +407,128 @@ export class PaperBroker {
     return this.close(positionId, this.partialQty(p, p.qty * Math.min(1, fraction), exec), exec, reason, ts);
   }
 
+  /** true when a position on `symbol` has crossed a funding boundary whose settled rate is not cached yet */
+  needsSettledRate(symbol: string, ts = Date.now()): boolean {
+    return this.state.positions.some((p) => {
+      if (p.symbol !== symbol) return false;
+      const b = Math.floor((p.lastFundingTs ?? p.openedAt) / FUNDING_INTERVAL_MS) * FUNDING_INTERVAL_MS + FUNDING_INTERVAL_MS;
+      return b <= ts && this.state.settledRates?.[symbol]?.[String(b)] === undefined;
+    });
+  }
+
+  /** Record the ticker funding rate seen at `ts` (call AFTER accrueFunding for the same tick). */
+  noteTickerRate(symbol: string, rate: number, ts = Date.now()): void {
+    if (!Number.isFinite(rate)) return;
+    const seen = (this.state.rateSeen ??= {});
+    const arr = (seen[symbol] ??= []);
+    const prev = arr[arr.length - 1];
+    if (prev && prev[1] === rate && Math.floor(prev[0] / FUNDING_INTERVAL_MS) === Math.floor(ts / FUNDING_INTERVAL_MS)) return;
+    arr.push([ts, rate]);
+    if (arr.length > 100) arr.splice(0, arr.length - 100);
+  }
+
+  /** Merge settled funding rates (Bitget public history-fund-rate: fundingTime = boundary ts). */
+  setSettledRates(symbol: string, list: ReadonlyArray<{ ts: number; rate: number }>): void {
+    const all = (this.state.settledRates ??= {});
+    const m = (all[symbol] ??= {});
+    for (const x of list) if (Number.isFinite(x.ts) && Number.isFinite(x.rate)) m[String(x.ts)] = x.rate;
+    const keys = Object.keys(m).map(Number).sort((a, b) => a - b);
+    for (const k of keys.slice(0, Math.max(0, keys.length - 60))) delete m[String(k)];
+  }
+
+  /**
+   * Funding rate for the boundary `b` (owner decision 3): the SETTLED rate from Bitget's history
+   * when known, else the last ticker rate seen BEFORE the boundary (the ticker shows the next
+   * period's rate right after settlement), else undefined.
+   */
+  fundingRateFor(symbol: string, b: number): number | undefined {
+    const settled = this.state.settledRates?.[symbol]?.[String(b)];
+    if (settled !== undefined) return settled;
+    const arr = this.state.rateSeen?.[symbol] ?? [];
+    for (let i = arr.length - 1; i >= 0; i--) if (arr[i][0] < b) return arr[i][1];
+    return undefined;
+  }
+
   /**
    * Funding at each 00/08/16 UTC boundary crossed since the last charge (or the open):
    * pay = dir × qty × mark × rate (long pays a positive rate). Debited from the wallet and
    * realizedNet now; attributed to fills (netPnl) when the position is closed.
-   * Approximation: the current rate is used for every boundary crossed.
+   * Rate per boundary = {@link fundingRateFor}; while the settled rate is unknown and the boundary
+   * is younger than `waitMs`, charging waits (live: give the history endpoint time to publish).
    */
-  accrueFunding(symbol: string, rate: number, mark: number, ts = Date.now()): BrokerEvent[] {
+  accrueFunding(symbol: string, mark: number, ts = Date.now(), waitMs = 0): BrokerEvent[] {
     const ev: BrokerEvent[] = [];
-    if (!Number.isFinite(rate) || !(mark > 0)) return ev;
+    if (!(mark > 0)) return ev;
     for (const p of this.state.positions) {
       if (p.symbol !== symbol) continue;
       const from = p.lastFundingTs ?? p.openedAt;
       let b = Math.floor(from / FUNDING_INTERVAL_MS) * FUNDING_INTERVAL_MS + FUNDING_INTERVAL_MS;
       let paid = 0;
+      let lastRate = 0;
       while (b <= ts) {
+        const settled = this.state.settledRates?.[symbol]?.[String(b)];
+        if (settled === undefined && ts - b < waitMs) break;
+        const rate = this.fundingRateFor(symbol, b);
+        if (rate === undefined) break;
         const pay = dir(p.side) * p.qty * mark * rate;
         this.state.wallet -= pay;
         p.realizedNet -= pay;
         p.fundingAcc = (p.fundingAcc ?? 0) + pay;
         p.lastFundingTs = b;
         paid += pay;
+        lastRate = rate;
         b += FUNDING_INTERVAL_MS;
       }
-      if (paid !== 0) ev.push({ kind: 'funding', positionId: p.id, message: `펀딩비 ${paid > 0 ? '지불' : '수령'} ${Math.abs(paid).toFixed(4)} USDT (${(rate * 100).toFixed(4)}%)` });
+      if (paid !== 0) ev.push({ kind: 'funding', positionId: p.id, message: `펀딩비 ${paid > 0 ? '지불' : '수령'} ${Math.abs(paid).toFixed(4)} USDT (${(lastRate * 100).toFixed(4)}%)` });
     }
     if (ev.length) this.snapEquity({ [symbol]: mark }, ts);
     return ev;
   }
 
+  /**
+   * N1 offline replay over CLOSED 1-minute bars (owner decision 1):
+   *  - a bar that touches BOTH a position's SL and one of its open TPs is assumed to hit the SL
+   *    first (conservative);
+   *  - otherwise levels are processed in path order (green bar: open→low→high→close, red bar:
+   *    open→high→low→close), every crossed SL / liquidation / TP level at its exact price;
+   *  - a position is only managed by bars that start at/after its open (`openedBefore`), and only
+   *    while it is open; funding is charged at the bar open for boundaries crossed.
+   */
+  replayBars(symbol: string, bars: ReadonlyArray<{ ts: number; open: number; high: number; low: number; close: number }>): BrokerEvent[] {
+    const ev: BrokerEvent[] = [];
+    for (const b of [...bars].sort((x, y) => x.ts - y.ts)) {
+      const t = b.ts + 59_999;
+      ev.push(...this.accrueFunding(symbol, b.open, b.ts));
+      const managed = () => this.state.positions.filter((p) => p.symbol === symbol && p.openedAt <= b.ts);
+      // SL-first when the same bar spans the SL and an open TP of a position
+      for (const p of managed()) {
+        const long = p.side === 'long';
+        const slHit = long ? b.low <= p.sl : b.high >= p.sl;
+        const tpHit = p.targets.some((x) => !x.done && (long ? b.high >= x.price : b.low <= x.price));
+        // trigger at the SL (or at the open when the bar gapped through it — stop-market fills worse)
+        if (slHit && tpHit) ev.push(...this.onPrice(symbol, long ? Math.min(b.open, p.sl) : Math.max(b.open, p.sl), t, undefined, b.ts));
+      }
+      const path = b.close >= b.open ? [b.open, b.low, b.high, b.close] : [b.open, b.high, b.low, b.close];
+      ev.push(...this.onPrice(symbol, path[0], t, undefined, b.ts));
+      for (let i = 1; i < path.length; i++) {
+        const a = path[i - 1], z = path[i];
+        const lv = managed()
+          .flatMap((p) => [p.sl, p.liqPrice, ...p.targets.filter((x) => !x.done).map((x) => x.price)])
+          .filter((x) => x > 0 && (x - a) * (x - z) < 0)
+          .sort((x, y) => (z > a ? x - y : y - x));
+        for (const px of [...lv, z]) ev.push(...this.onPrice(symbol, px, t, undefined, b.ts));
+      }
+    }
+    return ev;
+  }
+
   /** Tick-driven triggers: limit fills, liquidation (on mark when given), SL (last price, filled with
    *  slippage), TP1/TP2 (+ breakeven move). */
-  onPrice(symbol: string, price: number, ts = Date.now(), mark?: number): BrokerEvent[] {
+  onPrice(symbol: string, price: number, ts = Date.now(), mark?: number, openedBefore = Infinity): BrokerEvent[] {
     const liqRef = mark && mark > 0 ? mark : price;
     const ev: BrokerEvent[] = [];
+    const lt = (this.state.lastTickTs ??= {});
+    lt[symbol] = Math.max(lt[symbol] ?? 0, ts);
     for (const o of [...this.state.pending]) {
       if (o.symbol !== symbol) continue;
       const hit = o.side === 'long' ? price <= o.price : price >= o.price;
@@ -418,11 +539,14 @@ export class PaperBroker {
       else ev.push({ kind: 'close', message: `지정가 체결 실패: ${r.error}` });
     }
     for (const p of [...this.state.positions]) {
-      if (p.symbol !== symbol) continue;
+      if (p.symbol !== symbol || p.openedAt > openedBefore) continue;
       const long = p.side === 'long';
       if (p.liqPrice > 0 && (long ? liqRef <= p.liqPrice : liqRef >= p.liqPrice)) {
-        this.close(p.id, p.qty, p.liqPrice, '강제청산', ts);
-        ev.push({ kind: 'liq', positionId: p.id, message: `강제청산 @ ${this.px(p.symbol, p.liqPrice)}` });
+        // N10 / owner decision 2: isolated liquidation loses the WHOLE position margin — closed at the
+        // bankruptcy price entry·(1 ∓ 1/lev) with no extra exit fee (Bitget keeps the maintenance remainder)
+        const bk = long ? p.entry * (1 - 1 / p.leverage) : p.entry * (1 + 1 / p.leverage);
+        this.close(p.id, p.qty, bk, '강제청산', ts, 0);
+        ev.push({ kind: 'liq', positionId: p.id, message: `강제청산 @ ${this.px(p.symbol, p.liqPrice)} (증거금 전액 손실)` });
         continue;
       }
       if (long ? price <= p.sl : price >= p.sl) {
@@ -466,8 +590,8 @@ export class PaperBroker {
  * Pyramid add sizing (review A3, owner decision 5): the add never loosens the stop
  * (new SL = tighter of current SL and the suggestion) and the COMBINED loss at the new SL —
  * price distance on the averaged entry + leftover entry fees + the add's entry fee + taker exit
- * fee + stop slippage — stays within `budget` (the initial risk budget). Steps the add qty down
- * by the contract step until it fits; qty 0 when nothing fits.
+ * fee + stop slippage — stays within `budget` (the position's risk budget fixed at entry). Steps
+ * the add qty down by the contract step until it fits; qty 0 when nothing fits.
  */
 export function sizeAdd(p: Pick<PaperPosition, 'side' | 'qty' | 'entry' | 'sl' | 'entryFeeLeft'>, a: {
   last: number; suggestedSl?: number; budget: number; wantQty: number; step: number; slip?: number;
@@ -478,11 +602,7 @@ export function sizeAdd(p: Pick<PaperPosition, 'side' | 'qty' | 'entry' | 'sl' |
   const fill = a.last * (1 + dir(p.side) * slip);
   const qdp = Math.max(0, Math.round(-Math.log10(a.step)));
   const floor = (q: number) => Number((Math.floor(q / a.step + 1e-9) * a.step).toFixed(qdp));
-  const lossAt = (q: number) => {
-    const nq = p.qty + q;
-    const avg = (p.entry * p.qty + fill * q) / nq;
-    return dir(p.side) * (avg - newSl) * nq + p.entryFeeLeft + q * fill * TAKER_FEE + nq * newSl * (TAKER_FEE + slip);
-  };
+  const lossAt = (q: number) => lossAtSlAfterAdd(p, q, fill, newSl, slip);
   let qty = floor(a.wantQty);
   for (let guard = 0; qty > 0 && guard < 100_000; guard++) {
     if (lossAt(qty) <= a.budget + 1e-9) break;

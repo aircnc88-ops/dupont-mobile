@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { computeLevels, netRMultiple } from '@bitget-sim/dupont';
-import { PaperBroker, feeBreakeven, sizeAdd, realizedRSince, TAKER_FEE, MAKER_FEE, DEFAULT_BANKROLL, SLIP, FUNDING_INTERVAL_MS, tradeStats, fillsToCsv } from './broker';
+import { PaperBroker, feeBreakeven, sizeAdd, realizedRSince, lossAtSlAfterAdd, TAKER_FEE, MAKER_FEE, DEFAULT_BANKROLL, SLIP, FUNDING_INTERVAL_MS, tradeStats, fillsToCsv } from './broker';
 import { toBrokerTargets } from './fromSignal';
 
 const closeTo = (a: number, b: number, eps = 1e-9) => expect(Math.abs(a - b)).toBeLessThan(eps);
@@ -127,6 +127,7 @@ describe('paper broker (USDT-M, Bitget swap fees)', () => {
     b.state.positions[0].sl = 90; // simulate a stale stop below liq
     b.onPrice('X', 96.5, Date.now(), 95.4); // last above liq, mark below → liquidated
     expect(b.state.fills[0].reason).toBe('강제청산');
+    closeTo(b.state.fills[0].exit, 95, 1e-9); // N10: bankruptcy price 100 × (1 − 1/20)
   });
 
   it('C4: partial TP qty is floored to the step; a remainder under 5 USDT closes everything', () => {
@@ -160,15 +161,16 @@ describe('paper broker (USDT-M, Bitget swap fees)', () => {
     b.open({ symbol: 'BTCUSDT', side: 'long', qty: 0.01, price: 60000, leverage: 10, sl: 59000, targets: [], setup: 'MANUAL' }, t0);
     b.open({ symbol: 'BTCUSDT', side: 'short', qty: 0.01, price: 60000, leverage: 10, sl: 61000, targets: [], setup: 'MANUAL' }, t0);
     const w0 = b.state.wallet;
-    expect(b.accrueFunding('BTCUSDT', 0.0001, 60000, t0 + 30 * 60_000)).toEqual([]); // 07:30 – no boundary
-    const ev = b.accrueFunding('BTCUSDT', 0.0001, 60000, Date.UTC(2026, 9, 6, 8, 0, 1));
+    b.noteTickerRate('BTCUSDT', 0.0001, t0 + 60_000); // ticker rate seen before the 08:00 boundary
+    expect(b.accrueFunding('BTCUSDT', 60000, t0 + 30 * 60_000)).toEqual([]); // 07:30 – no boundary
+    const ev = b.accrueFunding('BTCUSDT', 60000, Date.UTC(2026, 9, 6, 8, 0, 1));
     expect(ev.length).toBe(2);
     const [L, S] = b.state.positions;
     closeTo(L.fundingAcc!, 0.06, 1e-12); // 0.01 × 60000 × 0.0001
     closeTo(S.fundingAcc!, -0.06, 1e-12);
     closeTo(b.state.wallet, w0, 1e-12); // long pays, short receives
-    expect(b.accrueFunding('BTCUSDT', 0.0001, 60000, Date.UTC(2026, 9, 6, 15, 59))).toEqual([]); // same window again → nothing
-    b.accrueFunding('BTCUSDT', 0.0001, 60000, Date.UTC(2026, 9, 7, 0, 0)); // 16:00 + 00:00 → two more
+    expect(b.accrueFunding('BTCUSDT', 60000, Date.UTC(2026, 9, 6, 15, 59))).toEqual([]); // same window again → nothing
+    b.accrueFunding('BTCUSDT', 60000, Date.UTC(2026, 9, 7, 0, 0)); // 16:00 + 00:00 → two more (last seen rate)
     closeTo(L.fundingAcc!, 0.18, 1e-12);
     // attributed to the closing fill and included in its net PnL
     b.close(L.id, L.qty, 60000, 'x', Date.UTC(2026, 9, 7, 1));
@@ -211,5 +213,103 @@ describe('paper broker (USDT-M, Bitget swap fees)', () => {
     expect(bigger.qty).toBe(r.qty);
     // budget already used by the open position → nothing fits
     expect(sizeAdd(pos, { last: 60600, budget: 1, wantQty: 0.001, step: 0.0001 }).qty).toBe(0);
+  });
+
+  it('N5 / owner decision 3: funding uses the settled rate, else the ticker rate seen BEFORE the boundary', () => {
+    const t0 = Date.UTC(2026, 9, 6, 7, 0);
+    const b8 = Date.UTC(2026, 9, 6, 8, 0);
+    const b = new PaperBroker();
+    b.slip = 0;
+    b.open({ symbol: 'BTCUSDT', side: 'long', qty: 0.01, price: 60000, leverage: 10, sl: 59000, targets: [], setup: 'MANUAL' }, t0);
+    b.noteTickerRate('BTCUSDT', 0.0001, b8 - 5_000); // last rate before settlement
+    b.noteTickerRate('BTCUSDT', 0.0009, b8 + 2_000); // ticker already shows the NEXT period's rate
+    expect(b.fundingRateFor('BTCUSDT', b8)).toBe(0.0001);
+    // live: settled rate unknown and the boundary is younger than waitMs → wait
+    expect(b.accrueFunding('BTCUSDT', 60000, b8 + 10_000, 180_000)).toEqual([]);
+    expect(b.needsSettledRate('BTCUSDT', b8 + 10_000)).toBe(true);
+    // settled rate published (Bitget history-fund-rate: fundingTime = boundary) → used
+    b.setSettledRates('BTCUSDT', [{ ts: b8, rate: 0.0002 }]);
+    expect(b.needsSettledRate('BTCUSDT', b8 + 10_000)).toBe(false);
+    b.accrueFunding('BTCUSDT', 60000, b8 + 20_000, 180_000);
+    closeTo(b.state.positions[0].fundingAcc!, 0.01 * 60000 * 0.0002, 1e-12);
+    // next boundary without a settled rate: after waitMs the pre-boundary ticker rate (0.0009 seen 08:00:02) applies
+    const b16 = Date.UTC(2026, 9, 6, 16, 0);
+    b.noteTickerRate('BTCUSDT', 0.0005, b16 + 1_000);
+    b.accrueFunding('BTCUSDT', 60000, b16 + 200_000, 180_000);
+    closeTo(b.state.positions[0].fundingAcc!, 0.12 + 0.54, 1e-9);
+  });
+
+  it('N10 / owner decision 2: isolated liquidation loses the whole position margin (no extra exit fee)', () => {
+    const b = new PaperBroker();
+    b.slip = 0;
+    const w0 = b.state.wallet;
+    b.open({ symbol: 'X', side: 'short', qty: 2, price: 100, leverage: 10, sl: 109, targets: [], setup: 'MANUAL' });
+    const p = b.state.positions[0];
+    const margin = p.margin, entryFee = p.entryFeeLeft;
+    closeTo(p.liqPrice, 109.5, 1e-9); // 100 × (1 + 0.1 − 0.005)
+    p.sl = 120; // stale stop beyond liq
+    const ev = b.onPrice('X', 109.6);
+    expect(ev[0].kind).toBe('liq');
+    const f = b.state.fills[0];
+    closeTo(f.exit, 110, 1e-9); // bankruptcy 100 × (1 + 1/10)
+    closeTo(f.grossPnl, -margin, 1e-9);
+    closeTo(b.state.wallet, w0 - entryFee - margin, 1e-9);
+  });
+
+  it('N1 / owner decision 1: offline replay fills the SL at the trigger, SL first when a bar spans SL and TP', () => {
+    const T = Date.UTC(2026, 9, 6, 6, 0);
+    const bar = (i: number, o: number, h: number, l: number, c: number) => ({ ts: T + i * 60_000, open: o, high: h, low: l, close: c });
+    const mk = () => {
+      const b = new PaperBroker();
+      b.slip = 0;
+      b.open({ symbol: 'X', side: 'long', qty: 1, price: 100, leverage: 10, sl: 98, targets: [{ price: 103, fraction: 1, label: 'TP' }], setup: 'MANUAL' }, T - 1);
+      return b;
+    };
+    // a bar spanning the SL fills at the SL price (not at the much lower close a first live tick would see)
+    const a = mk();
+    a.replayBars('X', [bar(0, 100, 100.5, 99, 99.5), bar(1, 99.5, 99.6, 95, 95.2)]);
+    expect(a.state.fills.length).toBe(1);
+    closeTo(a.state.fills[0].exit, 98, 1e-9);
+    expect(a.state.lastTickTs!.X).toBe(T + 60_000 + 59_999);
+    // both SL and TP inside one bar → SL first (conservative), even on a green bar
+    const s = mk();
+    s.replayBars('X', [bar(0, 100, 103.5, 97.5, 103)]);
+    expect(s.state.fills[0].reason).toContain('SL');
+    closeTo(s.state.fills[0].exit, 98, 1e-9);
+    // otherwise in time order: TP hit in bar 0, the later dip in bar 1 no longer matters
+    const t = mk();
+    t.replayBars('X', [bar(0, 100, 103.2, 99.5, 102), bar(1, 102, 102.1, 96, 96.5)]);
+    expect(t.state.fills.map((f) => f.reason)).toEqual(['TP']);
+    expect(t.state.positions.length).toBe(0);
+    // gap through the stop: stop-market fills at the (worse) bar open
+    const g = mk();
+    g.replayBars('X', [bar(0, 97, 97.5, 96, 96.2)]);
+    closeTo(g.state.fills[0].exit, 97, 1e-9);
+    // a position opened inside a bar is not managed by that bar
+    const late = new PaperBroker();
+    late.slip = 0;
+    late.open({ symbol: 'X', side: 'long', qty: 1, price: 100, leverage: 10, sl: 98, targets: [], setup: 'MANUAL' }, T + 30_000);
+    late.replayBars('X', [bar(0, 99, 100.2, 97, 100)]);
+    expect(late.state.positions.length).toBe(1);
+  });
+
+  it('A3 / N6 / owner decision 5: risk budget and first-fill qty are fixed at entry; the broker rejects an add beyond the budget', () => {
+    const b = new PaperBroker();
+    b.slip = 0;
+    b.open({ symbol: 'X', side: 'long', qty: 1, price: 100, leverage: 10, sl: 98, targets: [], setup: 'BREAKOUT_LONG', riskBudget: 2.5 });
+    const p = b.state.positions[0];
+    expect(p.initialQty).toBe(1);
+    expect(p.riskBudget).toBe(2.5);
+    // add 1 @ 103 with SL 98: combined loss ≈ (101.5 − 98) × 2 + fees > 2.5 → rejected
+    expect(lossAtSlAfterAdd(p, 1, 103, 98, 0)).toBeGreaterThan(2.5);
+    expect(b.open({ symbol: 'X', side: 'long', qty: 1, price: 103, leverage: 10, sl: 98, targets: [], setup: 'BREAKOUT_LONG', isAdd: true }).ok).toBe(false);
+    // tighter SL (101) → combined loss fits → accepted; initialQty stays the first fill
+    const ok = b.open({ symbol: 'X', side: 'long', qty: 1, price: 103, leverage: 10, sl: 101, targets: [], setup: 'BREAKOUT_LONG', isAdd: true });
+    expect(ok.ok).toBe(true);
+    expect(b.state.positions[0].initialQty).toBe(1);
+    expect(b.state.positions[0].riskBudget).toBe(2.5);
+    // sizeAdd against the stored budget agrees with the broker check
+    const sz = sizeAdd(b.state.positions[0], { last: 104, suggestedSl: 102, budget: 2.5, wantQty: 0.5, step: 0.01, slip: 0 });
+    expect(lossAtSlAfterAdd(b.state.positions[0], sz.qty, 104, sz.newSl, 0)).toBeLessThanOrEqual(2.5 + 1e-9);
   });
 });
