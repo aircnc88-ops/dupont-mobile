@@ -3,7 +3,7 @@ import type { Box } from './box';
 import type { SignalKind, SignalType } from './signals';
 import { pressureFromOHLCV, type Pressure } from './pressure';
 import { isBearishEngulfing, isBullishEngulfing } from './patterns';
-import { dec, num, roundToTick, toBar } from './util';
+import { Decimal, dec, num, roundToTick, toBar } from './util';
 
 /**
  * An open (paper) position managed by the Dupont rules. A {@link Signal} is assignable
@@ -49,6 +49,13 @@ export interface FlipAlertOptions {
    * approximation cannot show absorption). Default true.
    */
   requireTape?: boolean;
+  /**
+   * Owner decision 4 (round 2): absorption also needs the price to FAIL to progress on the spike
+   * candle. Long: the candle closes red/flat (close ≤ open) OR its close does not exceed the
+   * prior candle's close. Short (mirror): close ≥ open OR close does not go below the prior
+   * close. Default true.
+   */
+  requirePriceFailure?: boolean;
 }
 
 export interface FlipAlertDetail {
@@ -63,6 +70,8 @@ export interface FlipAlertDetail {
   averageOpposite: number;
   /** oppositeVolume / averageOpposite (Infinity when the average is 0). */
   multiple: number;
+  /** price failed to progress on the last candle (see {@link FlipAlertOptions.requirePriceFailure}) */
+  priceFailed: boolean;
   reason: string;
 }
 
@@ -82,7 +91,7 @@ export function pressureFlipAlertDetail(
   const nearPct = opts.nearTargetPct ?? 0.2;
   const none: FlipAlertDetail = {
     alert: false, nearTarget: false, target: null, progress: 0,
-    oppositeVolume: 0, averageOpposite: 0, multiple: 0, reason: 'insufficient data',
+    oppositeVolume: 0, averageOpposite: 0, multiple: 0, priceFailed: false, reason: 'insufficient data',
   };
   const n = lastCandles.length;
   if (n < 2 || position.targets.length === 0) return none;
@@ -108,7 +117,11 @@ export function pressureFlipAlertDetail(
   const oppVol = opp(pr(n - 1));
   const multiple = avg > 0 ? oppVol / avg : oppVol > 0 ? Infinity : 0;
   const strongOpp = multiple >= k;
-  const alert = nearTarget && strongOpp;
+  // price failure (owner decision 4): the spike candle did not carry price further in our favour
+  const prevClose = toBar(lastCandles[n - 2]).close;
+  const priceFailed = long ? last.close <= last.open || last.close <= prevClose : last.close >= last.open || last.close >= prevClose;
+  const needFail = opts.requirePriceFailure ?? true;
+  const alert = nearTarget && strongOpp && (!needFail || priceFailed);
   return {
     alert,
     nearTarget,
@@ -117,18 +130,21 @@ export function pressureFlipAlertDetail(
     oppositeVolume: oppVol,
     averageOpposite: avg,
     multiple,
+    priceFailed,
     reason: alert
-      ? `${long ? 'sell' : 'buy'} pressure ${multiple.toFixed(2)}x average near target ${next} — absorption, consider closing`
+      ? `${long ? 'sell' : 'buy'} pressure ${multiple.toFixed(2)}x average near target ${next} and price failed to progress — absorption, consider closing`
       : !nearTarget
         ? `not near target (${(progress * 100).toFixed(0)}% of the way)`
-        : `opposite pressure only ${multiple.toFixed(2)}x average (< ${k}x)`,
+        : !strongOpp
+          ? `opposite pressure only ${multiple.toFixed(2)}x average (< ${k}x)`
+          : 'opposite spike but price still progressing (no failure)',
   };
 }
 
 /**
  * Pressure-flip (absorption) alert: true when price is near the next target AND the last
- * candle's opposite-side pressure (sell for longs, buy for shorts) is ≥ k × its recent
- * average → recommend closing the position.
+ * (closed) candle's opposite-side pressure (sell for longs, buy for shorts) is ≥ k × its recent
+ * average AND price failed to progress on that candle → recommend closing the position.
  */
 export function pressureFlipAlert(
   position: DupontPosition,
@@ -146,8 +162,12 @@ export interface PyramidOptions {
   retestTolPct?: number;
   /** Pressure ratio that counts as "strong" without an engulfing. Default 0.6. */
   strongDominance?: number;
-  /** SL buffer % beyond the retest wick. Default 0.05. */
+  /** Minimum SL buffer beyond the retest wick, % of the wick price. Default 0.03 (same as signals). */
   slBufferPct?: number;
+  /** ATR (e.g. of the signal box window); buffer = max(wick × slBufferPct%, atrBufferFrac × atr). */
+  atr?: number;
+  /** Default 0.1 (same as signals). */
+  atrBufferFrac?: number;
   /** Size of each add as % of the initial position. Default 50. */
   addSizePct?: number;
   tickSize?: Num;
@@ -211,9 +231,11 @@ export function pyramidSuggestion(
   if (!engulf && ratio < strong) {
     return { add: false, reason: `retest without confirmation (ratio ${ratio.toFixed(2)})`, level: String(levelSrc) };
   }
-  const bufPct = opts.slBufferPct ?? 0.05;
+  // C11: same buffer rule as signal SLs — max(0.03% of the wick, 0.1 × ATR)
+  const bufPct = opts.slBufferPct ?? 0.03;
   const ext = dec(long ? c.low : c.high);
-  const buf = ext.times(bufPct).div(100);
+  const atrBuf = dec(opts.atr && Number.isFinite(opts.atr) ? opts.atr : 0).times(opts.atrBufferFrac ?? 0.1);
+  const buf = Decimal.max(ext.times(bufPct).div(100), atrBuf);
   const sl = roundToTick(long ? ext.minus(buf) : ext.plus(buf), opts.tickSize, long ? 'down' : 'up');
   return {
     add: true,

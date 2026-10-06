@@ -23,8 +23,10 @@ describe('pressureFlipAlert', () => {
   const hist = Array.from({ length: 20 }, (_, i) => cdl(i, 105 + i * 0.2, 105.5 + i * 0.2, 104.8 + i * 0.2, 105.2 + i * 0.2));
   const histP = hist.map(() => P(12, 10));
 
-  it('fires near target when opposite (sell) pressure ≥ k× average', () => {
-    const candles = [...hist, cdl(20, 109.2, 109.8, 109.1, 109.5)];
+  // spike candle: reaches 109.8 (near TP 110) but closes red below the prior close 109.0 → price failure
+  const failC = cdl(20, 109.2, 109.8, 108.8, 108.9);
+  it('fires near target when opposite (sell) pressure ≥ k× average and price fails', () => {
+    const candles = [...hist, failC];
     const ps = [...histP, P(10, 25)];
     expect(pressureFlipAlert(longPos, candles, ps)).toBe(true);
     const d = pressureFlipAlertDetail(longPos, candles, ps);
@@ -34,7 +36,7 @@ describe('pressureFlipAlert', () => {
   });
 
   it('does not fire when the opposite bar is not big enough', () => {
-    const candles = [...hist, cdl(20, 109.2, 109.8, 109.1, 109.5)];
+    const candles = [...hist, failC];
     expect(pressureFlipAlert(longPos, candles, [...histP, P(10, 15)])).toBe(false);
     expect(pressureFlipAlert(longPos, candles, [...histP, P(10, 15)], { k: 1.5 })).toBe(true);
   });
@@ -48,7 +50,7 @@ describe('pressureFlipAlert', () => {
   });
 
   it('B7: requires real tape pressure on the (closed) last candle unless requireTape = false', () => {
-    const candles = [...hist, cdl(20, 109.2, 109.8, 109.1, 109.5, 1000)];
+    const candles = [...hist, cdl(20, 109.2, 109.8, 108.8, 108.9, 1000)];
     const d = pressureFlipAlertDetail(longPos, candles, [...histP, undefined]);
     expect(d.alert).toBe(false);
     expect(d.reason).toBe('tape required');
@@ -57,10 +59,28 @@ describe('pressureFlipAlert', () => {
     expect(pressureFlipAlert(longPos, candles, [...histP, ohlcv], { requireTape: false })).toBe(true);
   });
 
+  it('B7 / owner decision 4: an opposite spike while price still progresses is NOT absorption', () => {
+    const ps = [...histP, P(10, 25)];
+    // green close above the prior close (109.0): price progressed despite the sell spike
+    const progressing = [...hist, cdl(20, 109.2, 109.8, 109.1, 109.5)];
+    const d = pressureFlipAlertDetail(longPos, progressing, ps);
+    expect(d.nearTarget).toBe(true);
+    expect(d.multiple).toBeCloseTo(2.5);
+    expect(d.priceFailed).toBe(false);
+    expect(d.alert).toBe(false);
+    expect(d.reason).toMatch(/still progressing/);
+    expect(pressureFlipAlert(longPos, progressing, ps, { requirePriceFailure: false })).toBe(true);
+    // red candle (close ≤ open) even though the close is above the prior close → failure
+    expect(pressureFlipAlert(longPos, [...hist, cdl(20, 109.6, 109.8, 109.1, 109.3)], ps)).toBe(true);
+    // green candle but the close does not exceed the prior close → failure
+    expect(pressureFlipAlert(longPos, [...hist, cdl(20, 108.5, 109.8, 108.4, 109.0)], ps)).toBe(true);
+  });
+
   it('short positions watch BUY pressure', () => {
     const shortPos: DupontPosition = { side: 'short', entry: '109', targets: [{ price: '105' }, { price: '100' }] };
     const h = Array.from({ length: 10 }, (_, i) => cdl(i, 104 - i * 0.3, 104.2 - i * 0.3, 103.6 - i * 0.3, 103.8 - i * 0.3));
-    const candles = [...h, cdl(10, 101, 101.1, 100.6, 100.9)];
+    // spike candle tags 100.6 (near TP 100) but closes green above the prior close 101.1 → failure
+    const candles = [...h, cdl(10, 101, 101.2, 100.6, 101.15)];
     const ps = [...h.map(() => P(5, 6)), P(20, 4)];
     expect(pressureFlipAlert(shortPos, candles, ps)).toBe(true);
     expect(pressureFlipAlert(shortPos, candles, [...h.map(() => P(5, 6)), P(6, 20)])).toBe(false);
@@ -80,7 +100,7 @@ describe('pyramidSuggestion', () => {
     expect(s.add).toBe(true);
     expect(s.addNumber).toBe(1);
     expect(s.entry).toBe('111.8');
-    expect(s.sl).toBe('110.04495'); // 110.1 − 0.05%
+    expect(s.sl).toBe('110.06697'); // 110.1 − 0.03% (no ATR given)
     expect(s.level).toBe('110');
   });
 
@@ -121,12 +141,20 @@ describe('pyramidSuggestion', () => {
     expect(r2.reason).toMatch(/move away/);
   });
 
+  it('C11: add SL buffer = max(0.03% of the wick, 0.1 × ATR), same as signals', () => {
+    // 0.1 × ATR 1.5 = 0.15 > 0.03% × 110.1 = 0.033 → SL 110.1 − 0.15
+    expect(pyramidSuggestion(pos, retest, [], box, { atr: 1.5 }).sl).toBe('109.95');
+    // small ATR → the 0.03% floor wins
+    expect(pyramidSuggestion(pos, retest, [], box, { atr: 0.1 }).sl).toBe('110.06697');
+    expect(pyramidSuggestion(pos, retest, [], box, { atr: 1.5, atrBufferFrac: 0.2, tickSize: '0.1' }).sl).toBe('109.8');
+  });
+
   it('short breakout retest of the broken bottom', () => {
     const shortPos: DupontPosition = { side: 'short', entry: '98', sl: '100.6', type: 'BREAKOUT_SHORT', targets: [{ price: '85.5' }], openedTs: T0ts(0) };
     const c = [cdl(0, 100.5, 100.6, 97.9, 98), cdl(1, 98, 98.5, 98.5 - 0.9, 98.2), cdl(2, 98.6, 99.3, 98.5, 99.2), cdl(3, 99.3, 99.8, 98.1, 98.2)];
     const s = pyramidSuggestion(shortPos, c, [], box);
     expect(s.add).toBe(true);
-    expect(s.sl).toBe('99.8499');
+    expect(s.sl).toBe('99.82994'); // 99.8 + 0.03%
   });
 });
 
