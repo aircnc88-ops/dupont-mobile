@@ -11,6 +11,7 @@ import { noBoxBreakoutDraft, toBrokerTargets } from './paper/fromSignal';
 import { DEFAULT_SETTINGS, load, loadRaw, save, type Settings } from './lib/storage';
 import { SYMBOLS, TIMEFRAMES, symInfo, floorQty, MIN_NOTIONAL_USDT } from './lib/symbols';
 import { fmt, mdhm, pct, signed } from './lib/format';
+import { ReplayGate, replayFrom } from './lib/replayGate';
 
 const TABS = ['차트', '거래', '포지션', '기록', '설정'] as const;
 type Tab = (typeof TABS)[number];
@@ -80,8 +81,14 @@ export default function App() {
     const h = await fetchFundingHistory(sym).catch(() => null);
     if (h?.length) { broker.current.setSettledRates(sym, h); save(K_BROKER, broker.current.state); }
   };
+  // ---- N1 offline replay + R1 gate: on open / resume (and on any tick that finds a gap), replay closed 1m bars
+  // since the last processed price; live ticks never jump an offline gap (lib/replayGate.ts) ----
+  const gate = useRef(new ReplayGate());
   /** one live price for `sym`: triggers, then funding for crossed boundaries, then remember the ticker rate */
   const liveTick = (sym: string, price: number, mark: number | undefined, rate: number | undefined) => {
+    const g = gate.current.tick(broker.current.state, sym, Date.now());
+    if (g === 'replaying') return [];
+    if (g === 'gap') { void runReplay(); return []; } // never jump an offline gap with a live price
     const now = Date.now();
     const ev = broker.current.onPrice(sym, price, now, mark);
     if (broker.current.needsSettledRate(sym, now)) void syncFunding(sym);
@@ -89,28 +96,29 @@ export default function App() {
     if (rate !== undefined) broker.current.noteTickerRate(sym, rate, now);
     return ev;
   };
-
-  // ---- N1 offline replay: on open / resume, replay closed 1m bars since the last processed tick ----
-  const replaying = useRef<Set<string>>(new Set());
   const runReplay = async () => {
     const b = broker.current;
-    const syms = new Set([...b.state.positions.map((p) => p.symbol), ...b.state.pending.map((o) => o.symbol)]);
+    const syms = gate.current.begin(b.state, Date.now()); // gates ALL of them before the first await
     for (const sym of syms) {
-      const from = b.state.lastTickTs?.[sym];
-      if (!from || Date.now() - from <= 30_000 || replaying.current.has(sym)) continue;
-      replaying.current.add(sym); // live ticks for this symbol wait until the replay is done
       try {
         await syncFunding(sym, true);
         const now = mkt.serverNow();
-        const start = Math.floor(from / 60_000) * 60_000;
-        const bars = (await fetchMinuteBars(sym, start, now)).filter((c) => c.ts >= start && c.ts + 60_000 <= now);
-        const ev = b.replayBars(sym, bars);
-        ev.forEach((e) => toast(`[재생] ${sym} ${e.message}`, e.kind === 'sl' || e.kind === 'liq' ? 'down' : e.kind === 'funding' ? 'info' : 'up'));
+        const start = Math.floor(replayFrom(b.state, sym) / 60_000) * 60_000;
+        const { bars, clampedFrom } = await fetchMinuteBars(sym, start, now);
+        const ev = b.replayBars(sym, bars.filter((c) => c.ts >= start && c.ts + 60_000 <= now));
+        // only the last 2 toasts stay visible: fold long funding runs into one line, show the clamp warning last
+        const fund = ev.filter((e) => e.kind === 'funding');
+        (fund.length > 2 ? ev.filter((e) => e.kind !== 'funding') : ev).forEach((e) => toast(`[재생] ${sym} ${e.message}`, e.kind === 'sl' || e.kind === 'liq' ? 'down' : e.kind === 'funding' ? 'info' : 'up'));
+        if (fund.length > 2) toast(`[재생] ${sym} 펀딩비 ${fund.length}회 반영 (마지막: ${fund[fund.length - 1].message})`, 'info');
+        if (clampedFrom > start) toast(`[재생] ${sym} ${mdhm(start)}~${mdhm(clampedFrom)} 구간은 1분봉 제공 범위(30일) 밖 – 재생 생략`, 'warn');
+        const lt = (b.state.lastTickTs ??= {});
+        lt[sym] = Math.max(lt[sym] ?? 0, Date.now()); // gap closed; the forming minute continues live
+        gate.current.succeeded(sym);
         commit();
       } catch {
-        /* network: retry on the next resume */
+        if (gate.current.failed(sym, Date.now())) toast(`[재생] ${sym} 1분봉 조회 3회 실패 – 현재가로 계속 (오프라인 구간 미반영)`, 'down');
       } finally {
-        replaying.current.delete(sym);
+        gate.current.release(sym);
       }
     }
   };
@@ -124,7 +132,7 @@ export default function App() {
 
   // tick-driven SL/TP/limit triggers for the active symbol
   useEffect(() => {
-    if (!last || replaying.current.has(s.symbol)) return;
+    if (!last || gate.current.replaying.has(s.symbol)) return;
     const ev = liveTick(s.symbol, last, mkt.ticker?.mark, mkt.ticker?.funding);
     if (ev.length) { ev.forEach((e) => toast(e.message, e.kind === 'sl' || e.kind === 'liq' ? 'down' : e.kind === 'funding' ? 'info' : 'up')); commit(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -135,7 +143,7 @@ export default function App() {
       const syms = new Set([...broker.current.state.positions.map((p) => p.symbol), ...broker.current.state.pending.map((o) => o.symbol)]);
       syms.delete(s.symbol);
       for (const sym of syms) {
-        if (replaying.current.has(sym)) continue;
+        if (gate.current.replaying.has(sym)) continue;
         const t = await fetchTicker(sym).catch(() => null);
         if (!t) continue;
         setMarks((m) => ({ ...m, [sym]: t.last }));
@@ -377,6 +385,11 @@ export default function App() {
               const setup = d.signal?.type ?? 'MANUAL';
               const breakoutLevel = d.kind === 'breakout' && dv.box ? Number(d.side === 'long' ? dv.box.top : dv.box.bottom) : undefined;
               if (orderType === 'limit') {
+                // R10: a limit on the wrong side of the market would be marketable (taker on Bitget) → refuse
+                if (d.side === 'long' ? limitPrice >= last : limitPrice <= last) {
+                  toast(`지정가가 현재가 ${d.side === 'long' ? '이상' : '이하'} – 즉시 체결되는 주문은 시장가로 넣으세요`, 'down');
+                  return;
+                }
                 const r = broker.current.placeLimit({ symbol: s.symbol, side: d.side, qty, price: limitPrice, leverage: s.leverage, sl, targets, setup, breakoutLevel, riskBudget: riskBudgetNow() });
                 toast(r.ok ? `지정가 ${d.side === 'long' ? '롱' : '숏'} 주문 ${fmt(qty, info.qdp)} @ ${fmt(limitPrice, info.dp)}` : r.error ?? '주문 실패', r.ok ? 'up' : 'down');
               } else {
