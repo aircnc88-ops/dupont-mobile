@@ -70,4 +70,4 @@ void 0&&m.lt(d(t.minQty))?u="min_qty":t.minNotional!==void 0&&m.times(o).lt(d(t.
 times(n).times(c),S=v.plus(P),R=m.times(o.plus(n)).times(i);return{side:r,qty:m.toFixed(),notional:g.toFixed(),margin:g.div(l).toFixed(),riskAmount:a.toFixed(),
 riskPerUnit:f.toFixed(),entryFee:v.toFixed(),exitFeeAtSl:P.toFixed(),estFees:S.toFixed(),lossAtSl:m.times(f).plus(S).plus(R).toFixed(),capped:h,...u?{belowMin:u}:
 {}}}const W={bitget_default:{spot:{maker:"0.001",taker:"0.001"},swap:{maker:"0.0002",taker:"0.0006"},stock:{maker:"0.00015",taker:"0.00015",taxReserved:"0"}}};function mt(t,e,s){
-const n=(W[t]??W.bitget_default)[e];return s=="maker"?n.maker:n.taker}export{X as a,mt as b,st as c,it as d,lt as e,at as f,ct as g,ot as n,I as p,ut as s};
+const n=(W[t]??W.bitget_default)[e];return s==="maker"?n.maker:n.taker}export{X as a,mt as b,st as c,it as d,lt as e,at as f,ct as g,ot as n,I as p,ut as s};
