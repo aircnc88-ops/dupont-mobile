@@ -3,11 +3,11 @@ import { computeLevels, netRMultiple, pressureFlipAlertDetail, pyramidSuggestion
 import Chart from './components/Chart';
 import OrderBook from './components/OrderBook';
 import { Btn, Card, Chips, NumField, Row, Toggle } from './components/ui';
-import { fetchTicker } from './data/bitget';
+import { fetchFundingHistory, fetchMinuteBars, fetchTicker } from './data/bitget';
 import { useMarket } from './useMarket';
 import { useDupont, type ManualBox } from './useDupont';
 import { PaperBroker, DEFAULT_BANKROLL, TAKER_FEE, MAKER_FEE, SLIP, SLIPPAGE_BPS, tradeStats, realizedRSince, fillsToCsv, upnl, sizeAdd, type PaperPosition, type Side, type Target } from './paper/broker';
-import { toBrokerTargets } from './paper/fromSignal';
+import { noBoxBreakoutDraft, toBrokerTargets } from './paper/fromSignal';
 import { DEFAULT_SETTINGS, load, loadRaw, save, type Settings } from './lib/storage';
 import { SYMBOLS, TIMEFRAMES, symInfo, floorQty, MIN_NOTIONAL_USDT } from './lib/symbols';
 import { fmt, mdhm, pct, signed } from './lib/format';
@@ -70,12 +70,62 @@ export default function App() {
   const [marks, setMarks] = useState<Record<string, number>>({});
   useEffect(() => { if (last) setMarks((m) => ({ ...m, [s.symbol]: last })); }, [last, s.symbol]);
 
+  // ---- funding (N5 / owner decision 3): settled rate from Bitget history, fallback = last ticker rate seen BEFORE the boundary ----
+  const FUNDING_WAIT_MS = 180_000; // live: wait up to 3 min after a boundary for the settled rate to be published
+  const fundSync = useRef<Record<string, number>>({});
+  const syncFunding = async (sym: string, force = false) => {
+    const now = Date.now();
+    if (!force && now - (fundSync.current[sym] ?? 0) < 30_000) return;
+    fundSync.current[sym] = now;
+    const h = await fetchFundingHistory(sym).catch(() => null);
+    if (h?.length) { broker.current.setSettledRates(sym, h); save(K_BROKER, broker.current.state); }
+  };
+  /** one live price for `sym`: triggers, then funding for crossed boundaries, then remember the ticker rate */
+  const liveTick = (sym: string, price: number, mark: number | undefined, rate: number | undefined) => {
+    const now = Date.now();
+    const ev = broker.current.onPrice(sym, price, now, mark);
+    if (broker.current.needsSettledRate(sym, now)) void syncFunding(sym);
+    ev.push(...broker.current.accrueFunding(sym, mark || price, now, FUNDING_WAIT_MS));
+    if (rate !== undefined) broker.current.noteTickerRate(sym, rate, now);
+    return ev;
+  };
+
+  // ---- N1 offline replay: on open / resume, replay closed 1m bars since the last processed tick ----
+  const replaying = useRef<Set<string>>(new Set());
+  const runReplay = async () => {
+    const b = broker.current;
+    const syms = new Set([...b.state.positions.map((p) => p.symbol), ...b.state.pending.map((o) => o.symbol)]);
+    for (const sym of syms) {
+      const from = b.state.lastTickTs?.[sym];
+      if (!from || Date.now() - from <= 30_000 || replaying.current.has(sym)) continue;
+      replaying.current.add(sym); // live ticks for this symbol wait until the replay is done
+      try {
+        await syncFunding(sym, true);
+        const now = mkt.serverNow();
+        const start = Math.floor(from / 60_000) * 60_000;
+        const bars = (await fetchMinuteBars(sym, start, now)).filter((c) => c.ts >= start && c.ts + 60_000 <= now);
+        const ev = b.replayBars(sym, bars);
+        ev.forEach((e) => toast(`[재생] ${sym} ${e.message}`, e.kind === 'sl' || e.kind === 'liq' ? 'down' : e.kind === 'funding' ? 'info' : 'up'));
+        commit();
+      } catch {
+        /* network: retry on the next resume */
+      } finally {
+        replaying.current.delete(sym);
+      }
+    }
+  };
+  useEffect(() => {
+    void runReplay();
+    const onVis = () => { if (document.visibilityState === 'visible') void runReplay(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // tick-driven SL/TP/limit triggers for the active symbol
   useEffect(() => {
-    if (!last) return;
-    const ev = broker.current.onPrice(s.symbol, last, Date.now(), mkt.ticker?.mark);
-    // funding at 00/08/16 UTC boundaries (current rate)
-    if (mkt.ticker) ev.push(...broker.current.accrueFunding(s.symbol, mkt.ticker.funding, mkt.ticker.mark || last));
+    if (!last || replaying.current.has(s.symbol)) return;
+    const ev = liveTick(s.symbol, last, mkt.ticker?.mark, mkt.ticker?.funding);
     if (ev.length) { ev.forEach((e) => toast(e.message, e.kind === 'sl' || e.kind === 'liq' ? 'down' : e.kind === 'funding' ? 'info' : 'up')); commit(); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [last]);
@@ -85,10 +135,11 @@ export default function App() {
       const syms = new Set([...broker.current.state.positions.map((p) => p.symbol), ...broker.current.state.pending.map((o) => o.symbol)]);
       syms.delete(s.symbol);
       for (const sym of syms) {
+        if (replaying.current.has(sym)) continue;
         const t = await fetchTicker(sym).catch(() => null);
         if (!t) continue;
         setMarks((m) => ({ ...m, [sym]: t.last }));
-        const ev = [...broker.current.onPrice(sym, t.last, Date.now(), t.mark), ...broker.current.accrueFunding(sym, t.funding, t.mark || t.last)];
+        const ev = liveTick(sym, t.last, t.mark, t.funding);
         if (ev.length) { ev.forEach((e) => toast(`${sym} ${e.message}`)); commit(); }
       }
     }, 4000);
@@ -120,6 +171,8 @@ export default function App() {
     return latest ?? h ?? null;
   }, [latest, dv.history, dv.closed]);
 
+  /** A3 / owner decision 5: the position's risk budget, fixed at entry = wallet × risk% at open */
+  const riskBudgetNow = () => (st.wallet * s.riskPct) / 100;
   // risk on REALIZED equity (wallet, no unrealized PnL); margin cap on available incl. entry fee; slippage + exchange minimums inside sizing
   const sizeFor = (entry: number, sl: number) =>
     sizePosition({
@@ -149,7 +202,7 @@ export default function App() {
     if (sz.belowMin || !(qty > 0)) { toast(`리스크 ${s.riskPct}% 기준 수량이 최소 주문(${MIN_NOTIONAL_USDT} USDT / ${info.qtyStep}) 미만`, 'down'); return; }
     const r = broker.current.open({
       symbol: s.symbol, side: g.side, qty, price, refPx: refPx(g.side), leverage: s.leverage, sl, targets, setup: g.type, signalId: sigId(g),
-      breakoutLevel: g.kind === 'breakout' ? Number(long ? g.box.top : g.box.bottom) : undefined,
+      breakoutLevel: g.kind === 'breakout' ? Number(long ? g.box.top : g.box.bottom) : undefined, riskBudget: riskBudgetNow(),
     });
     if (!r.ok) { toast(r.error ?? '진입 실패', 'down'); return; }
     seen.current.add(sigId(g)); save(K_SEEN, [...seen.current].slice(-300));
@@ -199,11 +252,11 @@ export default function App() {
       ? pyramidSuggestion({
           side: p.side, entry: p.entry, sl: p.initialSl, targets: p.targets.map((t) => ({ price: t.price })), type: p.setup as SignalType, adds: p.adds, brokenLevel: p.breakoutLevel,
           openedTs: Math.floor(p.openedAt / mkt.intervalMs) * mkt.intervalMs, lastAddTs: p.lastAddTs, risk: Math.abs((p.initialEntry ?? p.entry) - p.initialSl),
-        }, dv.closed, closedP, dv.box, { maxAdds: s.maxAdds, addSizePct: s.addSizePct, tickSize: tick })
+        }, dv.closed, closedP, dv.box, { maxAdds: s.maxAdds, addSizePct: s.addSizePct, tickSize: tick, atr: dv.signalBox?.atr ?? dv.box?.atr })
       : null;
     return { p, flip, pyr };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [bv, dv.closed, dv.pressures, dv.box, s.maxAdds, s.addSizePct, s.symbol, mkt.intervalMs]);
+  }), [bv, dv.closed, dv.pressures, dv.box, dv.signalBox, s.maxAdds, s.addSizePct, s.symbol, mkt.intervalMs]);
   const flipSeen = useRef(new Set<string>());
   useEffect(() => {
     for (const m of mgmt) {
@@ -219,9 +272,10 @@ export default function App() {
     commit();
   };
   const addOn = (p: PaperPosition, sug: { sl?: string; sizePct?: number }) => {
-    const initial = p.origQty / (1 + p.adds * (s.addSizePct / 100));
-    // combined loss at the (never loosened) SL must stay within the initial risk budget (A3 / owner decision 5)
-    const budget = (st.wallet * s.riskPct) / 100;
+    // N6: base the add on the real first fill (adds may have been risk-capped below addSizePct)
+    const initial = p.initialQty ?? p.origQty / (1 + p.adds * (s.addSizePct / 100));
+    // combined loss at the (never loosened) SL must stay within the budget FIXED AT ENTRY (A3 / owner decision 5)
+    const budget = p.riskBudget ?? (st.wallet * s.riskPct) / 100;
     const a = sizeAdd(p, { last: refPx(p.side), suggestedSl: sug.sl ? Number(sug.sl) : undefined, budget, wantQty: (initial * (sug.sizePct ?? s.addSizePct)) / 100, step: info.qtyStep });
     if (!(a.qty > 0)) { toast('추가 시 총 리스크가 한도 초과', 'down'); return; }
     if (a.qty * last < MIN_NOTIONAL_USDT) { toast(`추가 수량이 최소 주문 금액(${MIN_NOTIONAL_USDT} USDT) 미만`, 'down'); return; }
@@ -244,8 +298,8 @@ export default function App() {
       const r = (x?: string) => (x ? Number(x).toFixed(info.dp) : '');
       return { side, kind, sl: r(lv.sl), tp1: r(lv.targets[0]?.price), tp2: r(lv.targets[1]?.price) };
     }
-    const sl = side === 'long' ? last * 0.995 : last * 1.005;
-    return { side, kind: 'breakout', sl: sl.toFixed(info.dp), tp1: (last + (last - sl) * 3).toFixed(info.dp), tp2: '' };
+    // N7: no box → still a NET 1:3 TP (owner decision 2)
+    return { side, kind: 'breakout', ...noBoxBreakoutDraft(side, last, tick, info.dp), tp2: '' };
   }, [dv.closed, dv.box, last, info.dp, tick]);
   const [draft, setDraft] = useState<Draft | null>(null);
   const openDraftFromSignal = (g: Signal) => {
@@ -323,10 +377,10 @@ export default function App() {
               const setup = d.signal?.type ?? 'MANUAL';
               const breakoutLevel = d.kind === 'breakout' && dv.box ? Number(d.side === 'long' ? dv.box.top : dv.box.bottom) : undefined;
               if (orderType === 'limit') {
-                const r = broker.current.placeLimit({ symbol: s.symbol, side: d.side, qty, price: limitPrice, leverage: s.leverage, sl, targets, setup, breakoutLevel });
+                const r = broker.current.placeLimit({ symbol: s.symbol, side: d.side, qty, price: limitPrice, leverage: s.leverage, sl, targets, setup, breakoutLevel, riskBudget: riskBudgetNow() });
                 toast(r.ok ? `지정가 ${d.side === 'long' ? '롱' : '숏'} 주문 ${fmt(qty, info.qdp)} @ ${fmt(limitPrice, info.dp)}` : r.error ?? '주문 실패', r.ok ? 'up' : 'down');
               } else {
-                const r = broker.current.open({ symbol: s.symbol, side: d.side, qty, price: last, refPx: refPx(d.side), leverage: s.leverage, sl, targets, setup, breakoutLevel, signalId: d.signal ? sigId(d.signal) : undefined });
+                const r = broker.current.open({ symbol: s.symbol, side: d.side, qty, price: last, refPx: refPx(d.side), leverage: s.leverage, sl, targets, setup, breakoutLevel, signalId: d.signal ? sigId(d.signal) : undefined, riskBudget: riskBudgetNow() });
                 toast(r.ok ? `${d.side === 'long' ? '롱' : '숏'} 모의 진입 ${fmt(qty, info.qdp)} @ ${fmt(r.fillPx ?? last, info.dp)}` : r.error ?? '진입 실패', r.ok ? 'up' : 'down');
                 if (r.ok && d.signal) { seen.current.add(sigId(d.signal)); save(K_SEEN, [...seen.current].slice(-300)); }
               }
@@ -360,6 +414,7 @@ export default function App() {
                   <Row k={`SL${p.beMoved ? ' (본절)' : ''}`} v={fmt(p.sl, dp)} />
                   {p.targets.map((t, i) => <Row key={i} k={t.label} v={<span className={t.done ? 'text-up' : ''}>{fmt(t.price, dp)} · {Math.round(t.fraction * 100)}% {t.done ? '✓ 체결' : '대기'}</span>} />)}
                   <Row k="계획 리스크 (1R)" v={p.riskUsd ? `${fmt(p.riskUsd)} USDT` : '—'} />
+                  {p.riskBudget !== undefined && <Row k="리스크 예산 (진입 시 고정)" v={`${fmt(p.riskBudget)} USDT`} />}
                   {(p.fundingAcc ?? 0) !== 0 && <Row k="펀딩비 누적 (미정산)" v={<span className={(p.fundingAcc ?? 0) > 0 ? 'text-down' : 'text-up'}>{signed(-(p.fundingAcc ?? 0), 4)} USDT</span>} />}
                   <Row k="실현 손익 (순, 펀딩 포함)" v={signed(p.realizedNet)} />
                   {m?.flip.alert && <div className="mt-2 text-[12px] text-warn">⚠ 압력 반전 – 청산 권고 ({m.flip.multiple.toFixed(1)}배, 목표 진행 {Math.round(m.flip.progress * 100)}%)</div>}
@@ -424,7 +479,7 @@ export default function App() {
               <Toggle on={s.notify} onChange={async (v) => { if (v && 'Notification' in window && Notification.permission !== 'granted') await Notification.requestPermission(); set({ notify: v }); }} label="알림" hint="신호·체결·압력반전 (홈 화면 앱에서 권장)" />
             </Card>
             <div className="text-[11px] text-muted px-1 pb-4 leading-5">
-              페이퍼(모의) 트레이딩 전용 · 실계좌/API 키 없음 · Bitget 공개 시세 사용. 수수료: Bitget USDT-M 테이커 0.06% / 메이커 0.02% (TP도 테이커로 보수 계산). 슬리피지 {SLIPPAGE_BPS}bp (시장가·손절). 펀딩비: 00/08/16시 UTC마다 현재 펀딩률로 근사 반영. 돌파 TP 1:3은 수수료 차감 순손익 기준.
+              페이퍼(모의) 트레이딩 전용 · 실계좌/API 키 없음 · Bitget 공개 시세 사용. 수수료: Bitget USDT-M 테이커 0.06% / 메이커 0.02% (TP도 테이커로 보수 계산). 슬리피지 {SLIPPAGE_BPS}bp (시장가·손절). 펀딩비: 00/08/16시 UTC 정산 펀딩률(Bitget 공개 이력, 없으면 정산 직전 펀딩률). 강제청산 = 격리 증거금 전액 손실. 돌파 TP 1:3은 수수료 차감 순손익 기준. 앱이 꺼져 있던 동안은 다시 열 때 1분봉으로 재생 (SL·TP 동시 터치 시 SL 우선).
               압력: 실시간 체결(aggressor) 집계, 연결 이전 캔들은 OHLCV 근사.
             </div>
           </div>
