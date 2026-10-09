@@ -18,7 +18,8 @@ import { extendCandles, needsCandleReload } from './lib/candles';
  *  - server clock offset from trade timestamps (`serverNow`) so candle-close checks do not depend
  *    on the phone clock; Z1: `syncClock()` measures it from Bitget's public server time (before the
  *    first trade arrives, e.g. the resume replay right after a cold start) — every broker timestamp
- *    uses `serverNow`
+ *    uses `serverNow`; Z3: the subscribe snapshot (history) never sets the offset; Z2: `clockSynced()`
+ *    is false until one measurement succeeded (the replay then retries instead of stamping phone time)
  *  - books15 orderbook, ticker (mark / funding / 24h)
  */
 export function useMarket(symbol: string, tf: string) {
@@ -30,6 +31,8 @@ export function useMarket(symbol: string, tf: string) {
   const [tapeVer, setTapeVer] = useState(0);
   const tape = useRef(new TapeBuckets());
   const clockOffset = useRef(0);
+  /** Z2: true once the offset was measured (a WS update print or a /time sync) — never phone-clock-only */
+  const synced = useRef(false);
   const tfRef = useRef(tf);
   tfRef.current = tf;
   const candlesRef = useRef<Candle[]>([]);
@@ -55,7 +58,7 @@ export function useMarket(symbol: string, tf: string) {
         const ts = dedupe.filter(raw); // C6: repeats (by tradeId) never count twice
         if (!raw.length) return;
         const newest = raw[raw.length - 1];
-        clockOffset.current = newest.ts - Date.now();
+        if (!snapshot) { clockOffset.current = newest.ts - Date.now(); synced.current = true; } // Z3: snapshot prints are history — they would pull serverNow back by their age
         // N4: coverage is anchored on the newest snapshot print (server clock); every later print arrives as an update.
         // The snapshot itself is history already inside the REST candle volume → not added.
         if (snapshot) { tape.current.connected(newest.ts); return; }
@@ -130,15 +133,16 @@ export function useMarket(symbol: string, tf: string) {
   }, [symbol, status]);
 
   // Z1: one public server-time request on mount; runReplay awaits a fresh one before stamping anything.
-  // A failed / slow request keeps the current offset (trade-based, or 0 = phone clock as before).
+  // A failed / slow (> 4 s) request keeps the current offset; Z2: while nothing was ever measured, clockSynced() is
+  // false and runReplay refuses to stamp (gate retry in 15 s) instead of using the phone clock.
   const syncing = useRef<Promise<void> | null>(null);
   const syncClock = (): Promise<void> =>
     (syncing.current ??= fetchClockOffset()
-      .then((off) => { if (off !== null) clockOffset.current = off; })
+      .then((off) => { if (off !== null) { clockOffset.current = off; synced.current = true; } })
       .finally(() => { syncing.current = null; }));
   useEffect(() => { void syncClock(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const ms = TF_MS[tf] ?? 900_000;
   const serverNow = () => Date.now() + clockOffset.current;
-  return { candles, ticker, book, status, err, tape, tapeVer, intervalMs: ms, serverNow, syncClock };
+  return { candles, ticker, book, status, err, tape, tapeVer, intervalMs: ms, serverNow, syncClock, clockSynced: () => synced.current };
 }
