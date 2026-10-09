@@ -304,6 +304,7 @@ export default function App() {
   };
   const addOn = (p: PaperPosition, sug: { sl?: string; sizePct?: number }) => {
     if (!(last > 0)) { toast('현재가 확인 중 – 잠시 후 다시 추가하세요', 'warn'); return; } // Z11
+    if (p.symbol !== s.symbol) { toast(`${p.symbol} 불타기는 해당 심볼 화면에서만 가능합니다`, 'warn'); return; } // Z13: last / refPx / tick / qtyStep / lastClosedTs below are the SELECTED symbol's
     // N6: base the add on the real first fill (adds may have been risk-capped below addSizePct)
     const initial = p.initialQty ?? p.origQty / (1 + p.adds * (s.addSizePct / 100));
     // combined loss at the (never loosened) SL must stay within the budget FIXED AT ENTRY (A3 / owner decision 5)
@@ -387,7 +388,7 @@ export default function App() {
                   onBoxEdit={(top, bottom) => { const m = { top, bottom, startTs: manual?.startTs ?? dv.box?.startTime ?? mkt.serverNow(), locked: true }; setManual(m); save(`dupont.box.${s.symbol}`, m); }} />
               ) : <div className="p-6 text-muted text-sm">{mkt.err ? `데이터 오류: ${mkt.err}` : '캔들 불러오는 중…'}</div>}
             </div>
-            <BoxBar box={dv.box} manual={manual} dp={info.dp} tape={dv.tapeCandles} onUnlock={() => { setManual(null); save(`dupont.box.${s.symbol}`, null); setEditBox(false); }}
+            <BoxBar key={s.symbol} box={dv.box} manual={manual} dp={info.dp} tape={dv.tapeCandles} onUnlock={() => { setManual(null); save(`dupont.box.${s.symbol}`, null); setEditBox(false); }}
               onEdit={(top, bottom) => { const m = { top, bottom, startTs: manual?.startTs ?? dv.box?.startTime ?? mkt.serverNow(), locked: true }; setManual(m); save(`dupont.box.${s.symbol}`, m); }} />
             {mgmt.filter((m) => m.flip.alert).map((m) => (
               <div key={m.p.id} className="mx-3 mb-2 rounded-lg bg-warn/15 border border-warn px-3 py-2 flex items-center justify-between">
