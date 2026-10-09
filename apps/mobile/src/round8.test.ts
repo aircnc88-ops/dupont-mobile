@@ -141,14 +141,33 @@ describe('round 8 — Z8 Jev probe E: real candle-fetch failures with a position
     expect(a.b.state.positions[0].openedAt).toBe(S + 12 * M + 59_999);
   });
 
-  it('a liquidation in the gap (bar gapped below the liquidation price) is booked', () => {
-    const { a } = probe({ offline: { 12: [85, 86, 84, 85.5], 13: [99, 100, 98.95, 99.9] }, live: 100, fails: 4 });
-    expect(a.b.state.fills).toEqual([]);
-    a.ticksUntil(a.now() + 2 * (REPLAY_MAX_RETRY_MS + 5_000), 100);
-    expect(a.b.state.positions).toEqual([]);
-    const f = a.b.state.fills[0];
-    expect([f.reason, f.closedAt]).toEqual(['강제청산', S + 12 * M + 59_999]);
-    expect(f.exit).toBeCloseTo(90, 9); // bankruptcy price: whole margin lost
+  it('a liquidation in the gap is booked (realistic setup: SL removed / beyond liq via broker state; open() rejects that)', () => {
+    // open() refuses an SL beyond the liquidation price, so from a normal entry the SL always triggers first (Jev r9 E2).
+    // A liquidation in the gap therefore needs a position whose SL is gone or sits beyond liq — e.g. a stored position
+    // edited in localStorage or written by an older build. The test sets that DIRECTLY on the broker state after open(),
+    // documented here; the replayed bar itself is an ordinary red minute (open 99.9 → high 100 → low 84 → close 84.5).
+    const crash = { 12: [99.9, 100, 84, 84.5], rest: [84.5, 84.6, 84.4, 84.5] };
+    const probeWith = (sl: number | null) => probe({
+      offline: crash, live: 84.5, fails: 4,
+      setup: (x) => {
+        expect(x.b.open({ ...LONG, sl: 85 }, x.now()).ok).toBe(false); // 'SL이 청산가 밖' — rejected at entry
+        expect(x.b.open(LONG, x.now()).ok).toBe(true);
+        if (sl !== null) x.b.state.positions[0].sl = sl; // direct state edit (see above)
+      },
+    }).a;
+    for (const [sl, reason] of [[null, '손절 SL'], [0, '강제청산'], [85, '강제청산']] as const) {
+      const a = probeWith(sl);
+      const liq = a.b.state.positions[0].liqPrice;
+      expect(liq).toBeGreaterThan(90);
+      expect(liq).toBeLessThan(91);
+      expect(a.b.state.fills).toEqual([]); // nothing booked from the live 84.5 during the outage
+      a.ticksUntil(a.now() + 2 * (REPLAY_MAX_RETRY_MS + 5_000), 84.5);
+      expect(a.b.state.positions).toEqual([]);
+      const f = a.b.state.fills[0];
+      expect([f.reason, f.closedAt]).toEqual([reason, S + 12 * M + 59_999]);
+      if (sl === null) expect(f.exit).toBe(99); // normal entry: the SL at 99 fills first, on the way down
+      else expect(f.exit).toBeCloseTo(90, 9); // SL removed (0) or beyond liq (85): liquidated at the bankruptcy price, whole margin lost
+    }
   });
 
   it('manual close still works during the outage (replay pending, not running); SL / TP wait for the replay', () => {
