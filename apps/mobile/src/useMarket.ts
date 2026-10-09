@@ -24,7 +24,11 @@ import { extendCandles, needsCandleReload } from './lib/candles';
  */
 export function useMarket(symbol: string, tf: string) {
   const [candles, setCandles] = useState<Candle[]>([]);
-  const [ticker, setTicker] = useState<TickerInfo | null>(null);
+  const [ticker, setTicker] = useState<(TickerInfo & { sym?: string }) | null>(null);
+  /** Z11: symbol the candles in state belong to (set when this symbol's REST candles land) */
+  const candlesSym = useRef(symbol);
+  /** Z11 (book): symbol the order book in state belongs to (set by that symbol's WS book handler) */
+  const bookSym = useRef(symbol);
   const [book, setBook] = useState<WsBook | null>(null);
   const [status, setStatus] = useState<WsStatus>('connecting');
   const [err, setErr] = useState('');
@@ -52,8 +56,8 @@ export function useMarket(symbol: string, tf: string) {
         // N3: the gap starts at the last message on the dead socket (a half-open socket is only noticed ~55–80 s later)
         if (s === 'reconnecting' || s === 'closed') tape.current.disconnected((feed.lastMsgAt || Date.now()) + clockOffset.current);
       },
-      ticker: (t) => setTicker((prev) => ({ ...(prev ?? t), ...t })),
-      book: (b) => setBook(b),
+      ticker: (t) => setTicker((prev) => ({ ...(prev?.sym === symbol ? prev : t), ...t, sym: symbol })), // Z11: never merge into another symbol's ticker
+      book: (b) => { bookSym.current = symbol; setBook(b); }, // Z11 (book)
       trades: (raw, snapshot) => {
         const ts = dedupe.filter(raw); // C6: repeats (by tradeId) never count twice
         if (!raw.length) return;
@@ -96,6 +100,7 @@ export function useMarket(symbol: string, tf: string) {
           if (!alive || !c.length) return;
           setErr('');
           freshAt.current = Math.max(freshAt.current, Date.now() + clockOffset.current);
+          candlesSym.current = symbol; // Z11
           setCandles((prev) => {
             if (initial || !prev.length) return c;
             const lastRest = c[c.length - 1];
@@ -123,7 +128,7 @@ export function useMarket(symbol: string, tf: string) {
     let alive = true;
     const poll = () => fetchTicker(symbol).then((t) => {
       if (!alive || !t) return;
-      setTicker(t);
+      setTicker({ ...t, sym: symbol }); // Z11
       if (status !== 'live') applyPrice(t.last, 0, Date.now() + clockOffset.current);
     }).catch(() => {});
     poll();
@@ -149,5 +154,6 @@ export function useMarket(symbol: string, tf: string) {
 
   const ms = TF_MS[tf] ?? 900_000;
   const serverNow = () => Date.now() + clockOffset.current;
-  return { candles, ticker, book, status, err, tape, tapeVer, intervalMs: ms, serverNow, syncClock, clockSynced: () => synced.current };
+  // Z11: right after a symbol switch the state still holds the previous symbol's ticker / candles — never expose them
+  return { candles: candlesSym.current === symbol ? candles : [], ticker: ticker?.sym === symbol ? ticker : null, book: bookSym.current === symbol ? book : null, status, err, tape, tapeVer, intervalMs: ms, serverNow, syncClock, clockSynced: () => synced.current };
 }
