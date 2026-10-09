@@ -11,7 +11,7 @@ import { noBoxBreakoutDraft, toBrokerTargets } from './paper/fromSignal';
 import { DEFAULT_SETTINGS, load, loadRaw, save, type Settings } from './lib/storage';
 import { SYMBOLS, TIMEFRAMES, symInfo, floorQty, MIN_NOTIONAL_USDT } from './lib/symbols';
 import { fmt, mdhm, pct, signed } from './lib/format';
-import { ReplayGate, replayFrom } from './lib/replayGate';
+import { ReplayGate, replayFrom, REPLAY_MAX_FAILS } from './lib/replayGate';
 
 const TABS = ['차트', '거래', '포지션', '기록', '설정'] as const;
 type Tab = (typeof TABS)[number];
@@ -69,7 +69,8 @@ export default function App() {
 
   const last = mkt.ticker?.last ?? mkt.candles[mkt.candles.length - 1]?.close ?? 0;
   const [marks, setMarks] = useState<Record<string, number>>({});
-  useEffect(() => { if (last) setMarks((m) => ({ ...m, [s.symbol]: last })); }, [last, s.symbol]);
+  // Z9: a symbol switch alone must not copy the previous symbol's `last` into marks — only a NEW price is recorded
+  useEffect(() => { if (last) setMarks((m) => ({ ...m, [s.symbol]: last })); }, [last]); // eslint-disable-line react-hooks/exhaustive-deps -- Z9
 
   // ---- funding (N5 / owner decision 3): settled rate from Bitget history, fallback = last ticker rate seen BEFORE the boundary ----
   const FUNDING_WAIT_MS = 180_000; // live: wait up to 3 min after a boundary for the settled rate to be published
@@ -292,7 +293,11 @@ export default function App() {
 
   const closePos = (p: PaperPosition, frac: number, why: string) => {
     if (gate.current.replaying.has(p.symbol)) { toast('오프라인 구간 재생 중 – 잠시 후 다시 청산하세요', 'warn'); return; } // Z7
-    const f = broker.current.closeFraction(p.id, frac, marks[p.symbol] ?? last, why, mkt.serverNow());
+    const stalePx = (gate.current.fails[p.symbol]?.n ?? 0) >= REPLAY_MAX_FAILS ? broker.current.state.lastPx?.[p.symbol] : undefined;
+    const px = marks[p.symbol] ?? stalePx; // Z9: never fall back to another symbol's quote; Z10: an unreachable symbol can still be closed at its last processed price
+    if (!(px > 0)) { toast(`${p.symbol} 현재가 확인 중 – 잠시 후 다시 청산하세요`, 'warn'); return; }
+    if (marks[p.symbol] === undefined) toast(`${p.symbol} 시세 조회 불가 – 마지막 처리 가격 ${fmt(px, symInfo(p.symbol).dp)}로 청산`, 'warn');
+    const f = broker.current.closeFraction(p.id, frac, px, why, mkt.serverNow());
     if (f) toast(`${why} ${fmt(f.qty, symInfo(p.symbol).qdp)} @ ${fmt(f.exit, symInfo(p.symbol).dp)} · 순손익 ${signed(f.netPnl)} USDT`, f.netPnl >= 0 ? 'up' : 'down');
     commit();
   };
