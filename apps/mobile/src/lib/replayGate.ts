@@ -5,7 +5,9 @@
  *    has closed the gap — a live price never jumps an offline gap;
  *  - `begin()` gates ALL symbols to be replayed synchronously, before the first network await;
  *  - fetch failures back off (15 s between attempts); after 3 failures the gap is given up and live
- *    ticks resume (the caller shows a warning);
+ *    ticks resume (the caller shows a warning); Z5: failures while the server clock is unmeasured are
+ *    retried but never counted (the gap is never given up because of the clock);
+ *  - Z6: a failure stamped in the future (on a fast, unmeasured phone clock) is due at once;
  *  - legacy state without `lastTickTs` replays from the oldest open / order time.
  */
 export const REPLAY_GAP_MS = 30_000;
@@ -55,17 +57,18 @@ export class ReplayGate {
 
   /** Symbols to replay now (not already replaying, need it, not inside the retry backoff); ALL are gated before returning. */
   begin(st: GateState, now: number): string[] {
-    const syms = exposedSymbols(st).filter((sym) => !this.replaying.has(sym) && this.needsReplay(st, sym, now) && now - (this.fails[sym]?.at ?? 0) > this.retryMs);
+    const due = (sym: string) => { const at = this.fails[sym]?.at ?? 0; return now - at > this.retryMs || at > now; }; // Z6: stamped on a fast unmeasured clock → retry now
+    const syms = exposedSymbols(st).filter((sym) => !this.replaying.has(sym) && this.needsReplay(st, sym, now) && due(sym));
     syms.forEach((sym) => this.replaying.add(sym));
     return syms;
   }
 
   succeeded(sym: string): void { delete this.fails[sym]; }
 
-  /** Record a failed attempt; true when this was the last allowed one (caller warns that the gap is skipped). */
-  failed(sym: string, now: number): boolean {
+  /** Record a failed attempt; true when this was the last allowed one. `counts = false` (clock not measured yet): retried, never given up. */
+  failed(sym: string, now: number, counts = true): boolean {
     const f = (this.fails[sym] ??= { n: 0, at: 0 });
-    f.n += 1;
+    if (counts) f.n += 1;
     f.at = now;
     return f.n >= this.maxFails;
   }
