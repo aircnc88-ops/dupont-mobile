@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { fetchCandles, fetchTicker, type Candle, type TickerInfo } from './data/bitget';
+import { fetchCandles, fetchClockOffset, fetchTicker, type Candle, type TickerInfo } from './data/bitget';
 import { BitgetPublicFeed, TradeDedupe, type WsBook, type WsStatus } from './data/ws';
 import { TF_MS } from './lib/symbols';
 import { TapeBuckets } from './lib/tape';
@@ -16,7 +16,9 @@ import { extendCandles, needsCandleReload } from './lib/candles';
  *  - R3: a print that skips one or more candles (app backgrounded / WS down) does not synthesize a
  *    candle from the stale close (fake wick); REST is reloaded instead (throttled to 1 per 3 s)
  *  - server clock offset from trade timestamps (`serverNow`) so candle-close checks do not depend
- *    on the phone clock
+ *    on the phone clock; Z1: `syncClock()` measures it from Bitget's public server time (before the
+ *    first trade arrives, e.g. the resume replay right after a cold start) — every broker timestamp
+ *    uses `serverNow`
  *  - books15 orderbook, ticker (mark / funding / 24h)
  */
 export function useMarket(symbol: string, tf: string) {
@@ -127,7 +129,16 @@ export function useMarket(symbol: string, tf: string) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol, status]);
 
+  // Z1: one public server-time request on mount; runReplay awaits a fresh one before stamping anything.
+  // A failed / slow request keeps the current offset (trade-based, or 0 = phone clock as before).
+  const syncing = useRef<Promise<void> | null>(null);
+  const syncClock = (): Promise<void> =>
+    (syncing.current ??= fetchClockOffset()
+      .then((off) => { if (off !== null) clockOffset.current = off; })
+      .finally(() => { syncing.current = null; }));
+  useEffect(() => { void syncClock(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const ms = TF_MS[tf] ?? 900_000;
   const serverNow = () => Date.now() + clockOffset.current;
-  return { candles, ticker, book, status, err, tape, tapeVer, intervalMs: ms, serverNow };
+  return { candles, ticker, book, status, err, tape, tapeVer, intervalMs: ms, serverNow, syncClock };
 }
