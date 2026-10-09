@@ -134,13 +134,18 @@ export function useMarket(symbol: string, tf: string) {
 
   // Z1: one public server-time request on mount; runReplay awaits a fresh one before stamping anything.
   // A failed / slow (> 4 s) request keeps the current offset; Z2: while nothing was ever measured, clockSynced() is
-  // false and runReplay refuses to stamp (gate retry in 15 s) instead of using the phone clock.
+  // false and runReplay refuses to stamp (gate retry in 15 s) instead of using the phone clock; Z5: /time is retried
+  // every 15 s until one measurement succeeds (also with nothing exposed, so a new entry is server-stamped).
   const syncing = useRef<Promise<void> | null>(null);
   const syncClock = (): Promise<void> =>
     (syncing.current ??= fetchClockOffset()
       .then((off) => { if (off !== null) { clockOffset.current = off; synced.current = true; } })
       .finally(() => { syncing.current = null; }));
-  useEffect(() => { void syncClock(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    void syncClock();
+    const iv = setInterval(() => { if (!synced.current) void syncClock(); }, 15_000); // Z5: keep measuring until it works (also with nothing exposed)
+    return () => clearInterval(iv);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const ms = TF_MS[tf] ?? 900_000;
   const serverNow = () => Date.now() + clockOffset.current;
