@@ -114,7 +114,7 @@ describe('round 10 — Z11 useMarket never exposes another symbol\'s data', () =
     await btcThenEthOutage();
     H.feeds[ETH].ticker!({ last: 2500, mark: 2500.5, funding: 0.0002, change24h: 0.01, bid: 2499.9, ask: 2500.1 });
     const m = render(ETH);
-    expect(m.ticker).toEqual({ last: 2500, mark: 2500.5, funding: 0.0002, change24h: 0.01, bid: 2499.9, ask: 2500.1, sym: ETH });
+    expect(m.ticker).toMatchObject({ last: 2500, mark: 2500.5, funding: 0.0002, change24h: 0.01, bid: 2499.9, ask: 2500.1, sym: ETH });
     expect(app().refPx(m, 'long')).toBe(2500.1);
     // and back to BTC: the ETH ticker is not shown for BTC
     expect(render(BTC).ticker).toBeNull();
@@ -218,11 +218,12 @@ describe('round 10 — Z11 sizing / form defaults use only the current symbol', 
 
 describe('round 10 — Z11 source', () => {
   it('useMarket.ts tags ticker / candles / book and exposes only matching data', () => {
-    expect(marketSource).toContain('const [ticker, setTicker] = useState<(TickerInfo & { sym?: string }) | null>(null);');
-    expect(marketSource).toContain('ticker: (t) => setTicker((prev) => ({ ...(prev?.sym === symbol ? prev : t), ...t, sym: symbol })), // Z11');
+    expect(marketSource).toContain('const [ticker, setTicker] = useState<(TickerInfo & { sym?: string; at?: number }) | null>(null);');
+    expect(marketSource).toContain('ticker: (t) => setTicker((prev) => ({ ...(prev?.sym === symbol ? prev : t), ...t, sym: symbol, at: performance.now() })), // Z11');
     expect(marketSource).toContain('candlesSym.current = symbol; // Z11');
-    expect(marketSource).toContain('setTicker({ ...t, sym: symbol }); // Z11');
-    expect(marketSource).toContain('return { candles: candlesSym.current === symbol ? candles : [], ticker: ticker?.sym === symbol ? ticker : null, book: bookSym.current === symbol ? book : null,');
+    expect(marketSource).toContain('setTicker({ ...t, sym: symbol, at: performance.now() }); // Z11');
+    expect(marketSource).toContain('return { candles: candlesSym.current === symbol ? candles : [], ticker: ticker?.sym === symbol && (ticker.at ?? 0) >= since.current.at ? ticker : null, // Z12');
+    expect(marketSource).toContain('book: bookSym.current === symbol ? book : null,');
   });
   it('App.tsx refuses enterSignal / addOn / TradeTab submit while last ≤ 0 and tags the draft', () => {
     expect(appSource).toMatch(/const price = last;\n\s+if \(!\(price > 0\)\) \{ toast\('현재가 확인 중 – 잠시 후 다시 진입하세요', 'warn'\); return; \} \/\/ Z11/);
