@@ -84,6 +84,7 @@ export default function App() {
   // ---- N1 offline replay + R1 gate: on open / resume (and on any tick that finds a gap), replay 1m bars (incl. the forming one)
   // since the last processed price; live ticks never jump an offline gap (lib/replayGate.ts) ----
   const gate = useRef(new ReplayGate());
+  const clockWarned = useRef(false);
   /** one live price for `sym`: triggers, then funding for crossed boundaries, then remember the ticker rate */
   const liveTick = (sym: string, price: number, mark: number | undefined, rate: number | undefined) => {
     const g = gate.current.tick(broker.current.state, sym, mkt.serverNow()); // Z1: one (server) clock for every broker / gate timestamp
@@ -129,7 +130,9 @@ export default function App() {
         gate.current.succeeded(sym);
         commit();
       } catch {
-        if (gate.current.failed(sym, mkt.serverNow())) toast(`[재생] ${sym} 1분봉 조회 3회 실패 – 현재가로 계속 (오프라인 구간 미반영)`, 'down');
+        const clockUnknown = !mkt.clockSynced(); // Z5: never give a gap up because of the clock — live stays refused, manual close still works
+        if (gate.current.failed(sym, mkt.serverNow(), !clockUnknown)) toast(`[재생] ${sym} 1분봉 조회 3회 실패 – 현재가로 계속 (오프라인 구간 미반영)`, 'down');
+        else if (clockUnknown && !clockWarned.current) { clockWarned.current = true; toast(`[재생] 서버 시간 확인 실패 – 재시도 중 (오프라인 구간 반영 대기)`, 'warn'); }
       } finally {
         gate.current.release(sym);
       }
@@ -288,6 +291,7 @@ export default function App() {
   }, [mgmt]);
 
   const closePos = (p: PaperPosition, frac: number, why: string) => {
+    if (gate.current.replaying.has(p.symbol)) { toast('오프라인 구간 재생 중 – 잠시 후 다시 청산하세요', 'warn'); return; } // Z7
     const f = broker.current.closeFraction(p.id, frac, marks[p.symbol] ?? last, why, mkt.serverNow());
     if (f) toast(`${why} ${fmt(f.qty, symInfo(p.symbol).qdp)} @ ${fmt(f.exit, symInfo(p.symbol).dp)} · 순손익 ${signed(f.netPnl)} USDT`, f.netPnl >= 0 ? 'up' : 'down');
     commit();
