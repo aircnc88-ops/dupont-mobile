@@ -4,15 +4,17 @@
  *    REPLAY_GAP_MS (30 s, Jev's pick) needs a replay; live ticks for it are REFUSED until the replay
  *    has closed the gap — a live price never jumps an offline gap;
  *  - `begin()` gates ALL symbols to be replayed synchronously, before the first network await;
- *  - fetch failures back off (15 s between attempts); after 3 failures the gap is given up and live
- *    ticks resume (the caller shows a warning); Z5: failures while the server clock is unmeasured are
- *    retried but never counted (the gap is never given up because of the clock);
+ *  - Z8 (round 8, replaces R1's give-up): an exposed gap is NEVER given up — fetch failures back off
+ *    15 s → 30 s → 60 s → 120 s (max) and retry forever; the caller warns once at the 3rd failure; live
+ *    SL/TP stays deferred to the replay (booked SL-first at the exact level); manual close still works;
+ *    Z5: failures while the server clock is unmeasured are retried but never counted;
  *  - Z6: a failure stamped in the future (on a fast, unmeasured phone clock) is due at once;
  *  - legacy state without `lastTickTs` replays from the oldest open / order time.
  */
 export const REPLAY_GAP_MS = 30_000;
 export const REPLAY_RETRY_MS = 15_000;
 export const REPLAY_MAX_FAILS = 3;
+export const REPLAY_MAX_RETRY_MS = 120_000;
 
 export interface GateState {
   lastTickTs?: Record<string, number>;
@@ -44,20 +46,23 @@ export class ReplayGate {
 
   needsReplay(st: GateState, sym: string, now: number): boolean {
     const from = replayFrom(st, sym);
-    return isExposed(st, sym) && Number.isFinite(from) && now - from > this.gapMs && (this.fails[sym]?.n ?? 0) < this.maxFails;
+    return isExposed(st, sym) && Number.isFinite(from) && now - from > this.gapMs; // Z8: an exposed gap is never given up
   }
 
   /** Decision for one live tick on `sym`: 'live' = process it; 'replaying' / 'gap' = refuse it ('gap' → start a replay). */
   tick(st: GateState, sym: string, now: number): TickDecision {
     if (this.replaying.has(sym)) return 'replaying';
-    if (this.needsReplay(st, sym, now)) return 'gap';
-    if ((this.fails[sym]?.n ?? 0) >= this.maxFails) delete this.fails[sym]; // gave up on that gap → normal live again
-    return 'live';
+    return this.needsReplay(st, sym, now) ? 'gap' : 'live';
   }
 
   /** Symbols to replay now (not already replaying, need it, not inside the retry backoff); ALL are gated before returning. */
   begin(st: GateState, now: number): string[] {
-    const due = (sym: string) => { const at = this.fails[sym]?.at ?? 0; return now - at > this.retryMs || at > now; }; // Z6: stamped on a fast unmeasured clock → retry now
+    const due = (sym: string) => {
+      const f = this.fails[sym];
+      if (!f) return true;
+      const wait = Math.min(this.retryMs * 2 ** Math.max(0, f.n - 1), REPLAY_MAX_RETRY_MS); // Z8: 15 s, 30 s, 60 s, 120 s, 120 s …
+      return now - f.at > wait || f.at > now; // Z6
+    };
     const syms = exposedSymbols(st).filter((sym) => !this.replaying.has(sym) && this.needsReplay(st, sym, now) && due(sym));
     syms.forEach((sym) => this.replaying.add(sym));
     return syms;
@@ -65,12 +70,12 @@ export class ReplayGate {
 
   succeeded(sym: string): void { delete this.fails[sym]; }
 
-  /** Record a failed attempt; true when this was the last allowed one. `counts = false` (clock not measured yet): retried, never given up. */
+  /** Record a failed attempt; true exactly once, at the maxFails-th counted failure (caller warns; retries go on). `counts = false` (clock not measured yet, Z5): never counted. */
   failed(sym: string, now: number, counts = true): boolean {
     const f = (this.fails[sym] ??= { n: 0, at: 0 });
     if (counts) f.n += 1;
     f.at = now;
-    return f.n >= this.maxFails;
+    return counts && f.n === this.maxFails;
   }
 
   release(sym: string): void { this.replaying.delete(sym); }
