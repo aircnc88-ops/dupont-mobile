@@ -244,6 +244,6 @@ describe('round 7 — Z7 manual close is refused only while a replay is running'
     expect(a.b.state.positions.length).toBe(0);
   });
   it('App.tsx: closePos checks gate.current.replaying before closeFraction', () => {
-    expect(appSource).toMatch(/const closePos = \(p: PaperPosition, frac: number, why: string\) => \{\n\s+if \(gate\.current\.replaying\.has\(p\.symbol\)\) \{ toast\('[^']+', 'warn'\); return; \} \/\/ Z7\n\s+const f = broker\.current\.closeFraction\(/);
+    expect(appSource).toMatch(/const closePos = \(p: PaperPosition, frac: number, why: string\) => \{\n\s+if \(gate\.current\.replaying\.has\(p\.symbol\)\) \{ toast\('[^']+', 'warn'\); return; \} \/\/ Z7\n(?:[^\n]*\n)*?\s+const f = broker\.current\.closeFraction\(/); // Z9/Z10 (round 9) price lines sit in between
   });
 });
