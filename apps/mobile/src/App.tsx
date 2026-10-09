@@ -131,7 +131,7 @@ export default function App() {
         commit();
       } catch {
         const clockUnknown = !mkt.clockSynced(); // Z5: never give a gap up because of the clock — live stays refused, manual close still works
-        if (gate.current.failed(sym, mkt.serverNow(), !clockUnknown)) toast(`[재생] ${sym} 1분봉 조회 3회 실패 – 현재가로 계속 (오프라인 구간 미반영)`, 'down');
+        if (gate.current.failed(sym, mkt.serverNow(), !clockUnknown)) toast(`[재생] ${sym} 1분봉 조회 3회 실패 – 계속 재시도 중 (손절/익절은 재생 후 반영 · 수동 청산 가능)`, 'down'); // Z8: warn once, never give up
         else if (clockUnknown && !clockWarned.current) { clockWarned.current = true; toast(`[재생] 서버 시간 확인 실패 – 재시도 중 (오프라인 구간 반영 대기)`, 'warn'); }
       } finally {
         gate.current.release(sym);
