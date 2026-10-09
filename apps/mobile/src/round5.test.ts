@@ -160,6 +160,9 @@ describe('round 5 — Z1 App.tsx wiring guard', () => {
       'const id = Date.now() + Math.random();', // toast key
       'const now = Date.now(); // request throttle only (not a broker timestamp) — the phone clock is fine here',
     ]);
+    // Z4 (round 6): argument-less `new Date()` is phone time too — only the CSV filename may use it
+    const nd = app.split('\n').filter((l) => /new Date\(\)/.test(l)).map((l) => l.trim());
+    expect(nd).toEqual(["const name = `dupont-paper-${new Date().toISOString().slice(0, 10)}.csv`;"]);
   });
 });
 
