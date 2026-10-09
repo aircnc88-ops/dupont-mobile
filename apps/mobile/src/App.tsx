@@ -208,6 +208,7 @@ export default function App() {
   const enterSignal = (g: Signal, auto = false) => {
     if (st.positions.some((p) => p.symbol === s.symbol)) { toast('이미 포지션 보유 중', 'down'); return; }
     const price = last;
+    if (!(price > 0)) { toast('현재가 확인 중 – 잠시 후 다시 진입하세요', 'warn'); return; } // Z11
     const why = staleWhy(g);
     if (why) { toast(`${why} – 진입 불가`, 'down'); return; }
     // re-anchor targets to the live entry (same SL); breakout TP stays NET 1:3 from the live price
@@ -302,6 +303,7 @@ export default function App() {
     commit();
   };
   const addOn = (p: PaperPosition, sug: { sl?: string; sizePct?: number }) => {
+    if (!(last > 0)) { toast('현재가 확인 중 – 잠시 후 다시 추가하세요', 'warn'); return; } // Z11
     // N6: base the add on the real first fill (adds may have been risk-capped below addSizePct)
     const initial = p.initialQty ?? p.origQty / (1 + p.adds * (s.addSizePct / 100));
     // combined loss at the (never loosened) SL must stay within the budget FIXED AT ENTRY (A3 / owner decision 5)
@@ -331,7 +333,10 @@ export default function App() {
     // N7: no box → still a NET 1:3 TP (owner decision 2)
     return { side, kind: 'breakout', ...noBoxBreakoutDraft(side, last, tick, info.dp), tp2: '' };
   }, [dv.closed, dv.box, last, info.dp, tick]);
-  const [draft, setDraft] = useState<Draft | null>(null);
+  // Z11 (draft): a draft belongs to the symbol it was made on — another symbol's SL/TP never prefill this form
+  const [draftRaw, setDraftRaw] = useState<(Draft & { sym: string }) | null>(null);
+  const draft = draftRaw?.sym === s.symbol ? draftRaw : null;
+  const setDraft = (d: Draft | null) => setDraftRaw(d && { ...d, sym: s.symbol });
   const openDraftFromSignal = (g: Signal) => {
     const r = (x?: string) => (x ? Number(x).toFixed(info.dp) : '');
     setDraft({ side: g.side, kind: g.kind, sl: r(g.sl), tp1: r(g.targets[0]?.price), tp2: r(g.targets[1]?.price), signal: g });
@@ -400,6 +405,7 @@ export default function App() {
             s={s} set={set} last={last} dp={info.dp} book={mkt.book} equity={equity} available={available} qtyStep={info.qtyStep}
             draft={draft} setDraft={setDraft} defaultDraft={defaultDraft} sizeFor={sizeFor}
             onSubmit={(d, orderType, limitPrice, qty) => {
+              if (!(last > 0)) { toast('현재가 확인 중 – 잠시 후 다시 주문하세요', 'warn'); return; } // Z11
               const sl = Number(d.sl);
               const targets: Target[] = d.kind === 'breakout' || !d.tp2
                 ? [{ price: Number(d.tp1), fraction: 1, label: d.kind === 'breakout' ? 'TP 1:3' : 'TP' }]
