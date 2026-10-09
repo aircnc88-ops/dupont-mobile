@@ -2,16 +2,20 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { computeLevels, netRMultiple, pressureFlipAlertDetail, pyramidSuggestion, sizePosition, type Signal, type SignalType } from '@bitget-sim/dupont';
 import Chart from './components/Chart';
 import OrderBook from './components/OrderBook';
-import { Btn, Card, Chips, NumField, Row, Toggle } from './components/ui';
+import { Btn, Card, Chips, NumField, Row, TextField, Toggle } from './components/ui';
 import { fetchFundingHistory, fetchMinuteBars, fetchTicker } from './data/bitget';
 import { useMarket } from './useMarket';
 import { useDupont, type ManualBox } from './useDupont';
-import { PaperBroker, DEFAULT_BANKROLL, TAKER_FEE, MAKER_FEE, SLIP, SLIPPAGE_BPS, tradeStats, realizedRSince, fillsToCsv, upnl, sizeAdd, type PaperPosition, type Side, type Target } from './paper/broker';
+import { PaperBroker, DEFAULT_BANKROLL, TAKER_FEE, MAKER_FEE, SLIP, SLIPPAGE_BPS, tradeStats, realizedRSince, upnl, sizeAdd, type PaperPosition, type Side, type Target } from './paper/broker';
 import { noBoxBreakoutDraft, toBrokerTargets } from './paper/fromSignal';
 import { DEFAULT_SETTINGS, load, loadRaw, save, type Settings } from './lib/storage';
 import { SYMBOLS, TIMEFRAMES, symInfo, floorQty, MIN_NOTIONAL_USDT } from './lib/symbols';
 import { fmt, mdhm, pct, signed } from './lib/format';
 import { ReplayGate, replayFrom, REPLAY_MAX_FAILS } from './lib/replayGate';
+import { useJournal, type Journal } from './useJournal';
+import { SKIP, toCsv, type SheetTab } from './lib/sheetsSchema';
+import { configured } from './lib/sheetsSync';
+import { tradesFromFills } from './lib/journal';
 
 const TABS = ['차트', '거래', '포지션', '기록', '설정'] as const;
 type Tab = (typeof TABS)[number];
@@ -176,6 +180,9 @@ export default function App() {
   const equity = broker.current.equity(marks);
   const available = broker.current.available();
   const myPositions = st.positions.filter((p) => p.symbol === s.symbol);
+  // journal (tape pressure / signals / trades → IndexedDB + optional Google Sheets webhook) — logging only
+  const journal = useJournal({ symbol: s.symbol, tf: s.tf, intervalMs: mkt.intervalMs, closed: dv.closed, pressures: dv.pressures, live: dv.live, tape: mkt.tape, serverNow: mkt.serverNow,
+    state: st, bv, autoPaper: s.autoPaper, url: s.sheetsUrl, token: s.sheetsToken });
 
   // ---- signals ----
   const seen = useRef<Set<string>>(new Set(loadRaw<string[]>(K_SEEN) ?? []));
@@ -232,6 +239,7 @@ export default function App() {
     }, mkt.serverNow());
     if (!r.ok) { toast(r.error ?? '진입 실패', 'down'); return; }
     seen.current.add(sigId(g)); save(K_SEEN, [...seen.current].slice(-300));
+    journal.signalOutcome(g, true); // journal: signal taken
     toast(`${auto ? '[자동] ' : ''}${TYPE_KO[g.type]} 모의 진입 ${fmt(qty, info.qdp)} @ ${fmt(r.fillPx ?? price, info.dp)}`, 'up');
     commit();
   };
@@ -260,9 +268,9 @@ export default function App() {
     if (s.autoPaper && !myPositions.length) {
       // owner decision 7 / B3: auto-paper only acts on real trade-tape pressure
       const gate = latest.pressure.source !== 'trades' ? '압력이 OHLCV 근사' : autoGate(latest);
-      if (gate) toast(`[자동] 진입 생략 – ${gate}`, 'info');
-      else enterSignal(latest, true);
-    }
+      if (gate) { toast(`[자동] 진입 생략 – ${gate}`, 'info'); journal.signalOutcome(latest, false, gate === '압력이 OHLCV 근사' ? SKIP.pressureOhlcv : gate.startsWith('손실 후') ? SKIP.lossCooldown : SKIP.dailyStop); }
+      else { journal.signalOutcome(latest, false, SKIP.entryRefused); enterSignal(latest, true); } // journal: refused unless enterSignal marks it taken
+    } else if (s.autoPaper) journal.signalOutcome(latest, false, SKIP.positionOpen);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [latest?.ts, latest?.type]);
 
@@ -424,7 +432,7 @@ export default function App() {
               } else {
                 const r = broker.current.open({ symbol: s.symbol, side: d.side, qty, price: last, refPx: refPx(d.side), leverage: s.leverage, sl, targets, setup, breakoutLevel, signalId: d.signal ? sigId(d.signal) : undefined, riskBudget: riskBudgetNow() }, mkt.serverNow());
                 toast(r.ok ? `${d.side === 'long' ? '롱' : '숏'} 모의 진입 ${fmt(qty, info.qdp)} @ ${fmt(r.fillPx ?? last, info.dp)}` : r.error ?? '진입 실패', r.ok ? 'up' : 'down');
-                if (r.ok && d.signal) { seen.current.add(sigId(d.signal)); save(K_SEEN, [...seen.current].slice(-300)); }
+                if (r.ok && d.signal) { seen.current.add(sigId(d.signal)); save(K_SEEN, [...seen.current].slice(-300)); journal.signalOutcome(d.signal, true); }
               }
               commit();
             }}
@@ -484,7 +492,7 @@ export default function App() {
           </div>
         )}
 
-        {tab === '기록' && <HistoryTab broker={broker.current} />}
+        {tab === '기록' && <HistoryTab broker={broker.current} journal={journal} />}
 
         {tab === '설정' && (
           <div className="flex-1 overflow-y-auto p-3 space-y-3">
@@ -517,6 +525,7 @@ export default function App() {
               <Toggle on={s.requireRange} onChange={(v) => set({ requireRange: v })} label="박스권(비추세)일 때만 신호" />
               <Toggle on={s.showHist} onChange={(v) => set({ showHist: v })} label="압력 히스토그램 표시" />
             </Card>
+            <SheetsCard s={s} set={set} journal={journal} />
             <Card className="p-3">
               <Toggle on={s.notify} onChange={async (v) => { if (v && 'Notification' in window && Notification.permission !== 'granted') await Notification.requestPermission(); set({ notify: v }); }} label="알림" hint="신호·체결·압력반전 (홈 화면 앱에서 권장)" />
             </Card>
@@ -675,7 +684,49 @@ function TradeTab(p: {
   );
 }
 
-function HistoryTab({ broker }: { broker: PaperBroker }) {
+function SheetsCard({ s, set, journal }: { s: Settings; set: (x: Partial<Settings>) => void; journal: Journal }) {
+  const on = configured({ url: s.sheetsUrl, token: s.sheetsToken });
+  const st = journal.status;
+  const urlBad = s.sheetsUrl.trim() !== '' && !/^https:\/\/\S+$/.test(s.sheetsUrl.trim());
+  return (
+    <Card className="p-3 space-y-2">
+      <div className="text-sm font-semibold">구글 시트 연동 (선택)</div>
+      <TextField label="웹훅 URL" value={s.sheetsUrl} onChange={(v) => set({ sheetsUrl: v.trim() })} placeholder="https://script.google.com/macros/s/…/exec" />
+      <TextField label="토큰" value={s.sheetsToken} onChange={(v) => set({ sheetsToken: v.trim() })} type="password" placeholder="Apps Script SHARED_TOKEN" />
+      {urlBad && <div className="text-[11px] text-down">https:// 로 시작하는 URL만 사용합니다</div>}
+      <div className="text-[11px] text-muted leading-5" data-testid="sheets-status">
+        {!on ? '꺼짐 – URL과 토큰을 모두 입력하면 캔들 마감마다 전송합니다 (기록은 기기에만 저장)'
+          : st.at === undefined ? `대기 ${st.pending}행 · 아직 전송 없음`
+          : st.ok ? `마지막 동기화 ${mdhm(st.at)} 성공 · ${st.tab} ${st.appended ?? 0}행 추가 · 대기 ${st.pending}행`
+          : `마지막 동기화 ${mdhm(st.at)} 실패 (${st.error}) · ${st.nextAt ? `${hhmmss(st.nextAt)} 재시도` : '재시도 대기'} · 대기 ${st.pending}행`}
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <Btn className="h-9" disabled={!on || !st.pending} onClick={() => { void journal.sync.flush(true); }}>지금 전송</Btn>
+        <Btn className="h-9" disabled={!st.pending} onClick={() => { if (confirm(`대기 중인 ${st.pending}행을 버릴까요? (기기 기록은 유지)`)) journal.sync.clear(); }}>대기열 비우기</Btn>
+      </div>
+      <div className="text-[10px] text-muted leading-4">모의 거래·테이프 압력·신호만 전송 (거래소 키 없음). 토큰은 이 기기에만 저장됩니다.</div>
+    </Card>
+  );
+}
+const hhmmss = (ms: number) => { const d = new Date(ms); return [d.getHours(), d.getMinutes(), d.getSeconds()].map((x) => String(x).padStart(2, '0')).join(':'); };
+
+function downloadCsv(csv: string, prefix: string) {
+  const day = (() => { // filename only: the phone date is fine here
+    const name = `dupont-paper-${new Date().toISOString().slice(0, 10)}.csv`;
+    return name.slice('dupont-paper-'.length, -4);
+  })();
+  const name = `${prefix}-${day}.csv`;
+  const file = new File([csv], name, { type: 'text/csv' });
+  if ((navigator as any).canShare?.({ files: [file] })) return (navigator as any).share({ files: [file], title: name }).catch(() => saveFile(file, name));
+  saveFile(file, name);
+}
+function saveFile(file: File, name: string) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(file); a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+function HistoryTab({ broker, journal }: { broker: PaperBroker; journal: Journal }) {
   const st = broker.state;
   const stats = tradeStats(st.fills, st.positions.map((x) => x.id));
   const curve = st.equityCurve;
@@ -683,14 +734,13 @@ function HistoryTab({ broker }: { broker: PaperBroker }) {
   const ys = curve.map((c) => c.equity);
   const lo = Math.min(...ys, st.bankroll), hi = Math.max(...ys, st.bankroll);
   const path = curve.map((c, i) => `${i ? 'L' : 'M'}${(i / Math.max(1, curve.length - 1)) * W},${H - ((c.equity - lo) / Math.max(1e-9, hi - lo)) * (H - 10) - 5}`).join(' ');
-  const exportCsv = async () => {
-    const csv = fillsToCsv(st.fills);
-    const name = `dupont-paper-${new Date().toISOString().slice(0, 10)}.csv`;
-    const file = new File([csv], name, { type: 'text/csv' });
-    if ((navigator as any).canShare?.({ files: [file] })) { try { await (navigator as any).share({ files: [file], title: name }); return; } catch { /* fallthrough */ } }
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(file); a.download = name; a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  const [counts, setCounts] = useState<{ tape: number; sig: number } | null>(null);
+  useEffect(() => { Promise.all([journal.store.count('tape_pressure'), journal.store.count('signals')]).then(([tape, sig]) => setCounts({ tape, sig })).catch(() => setCounts({ tape: 0, sig: 0 })); }, [journal.store]);
+  /** CSV exports use the Google Sheets tab columns (lib/sheetsSchema.ts) */
+  const exportCsv = async (tab: SheetTab) => {
+    if (tab === 'trades') return downloadCsv(toCsv('trades', tradesFromFills(st.fills, journal.meta)), 'dupont-trades');
+    const rows = tab === 'tape_pressure' ? await journal.store.all('tape_pressure') : await journal.store.all('signals');
+    downloadCsv(toCsv(tab, rows), tab === 'tape_pressure' ? 'dupont-tape-pressure' : 'dupont-signals');
   };
   return (
     <div className="flex-1 overflow-y-auto p-3 space-y-3">
@@ -711,7 +761,15 @@ function HistoryTab({ broker }: { broker: PaperBroker }) {
         </svg>
         {st.positions.length > 0 && <div className="text-[11px] text-muted mt-1">지갑 기준 · 보유 포지션의 진입 수수료는 이미 차감됨 (미실현 손익 제외)</div>}
       </Card>
-      <Btn className="w-full" onClick={exportCsv} disabled={!st.fills.length}>CSV 내보내기</Btn>
+      <Card className="p-3">
+        <div className="text-sm font-semibold mb-2">CSV 내보내기</div>
+        <div className="grid grid-cols-3 gap-2">
+          <Btn className="h-10 px-2 text-[12px]" onClick={() => exportCsv('trades')} disabled={!st.fills.some((f) => f.final)}>거래</Btn>
+          <Btn className="h-10 px-2 text-[12px]" onClick={() => exportCsv('tape_pressure')} disabled={!counts?.tape}>테이프 압력</Btn>
+          <Btn className="h-10 px-2 text-[12px]" onClick={() => exportCsv('signals')} disabled={!counts?.sig}>신호</Btn>
+        </div>
+        <div className="text-[10px] text-muted mt-1 num">기기 기록: 테이프 압력 {counts?.tape ?? '…'}캔들 · 신호 {counts?.sig ?? '…'}건 (최대 5만/2만, 오래된 것부터 삭제)</div>
+      </Card>
       {[...st.fills].reverse().map((f) => (
         <Card key={f.id} className="p-3">
           <div className="flex justify-between text-[13px]">
