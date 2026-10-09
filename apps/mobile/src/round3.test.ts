@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PaperBroker, feeBreakeven, TAKER_FEE } from './paper/broker';
 import { fetchFundingHistory, fetchMinuteBars, MINUTE_HISTORY_MS, type Candle } from './data/bitget';
-import { ReplayGate, replayFrom, REPLAY_GAP_MS, REPLAY_RETRY_MS } from './lib/replayGate';
+import { ReplayGate, replayFrom, REPLAY_GAP_MS, REPLAY_MAX_RETRY_MS } from './lib/replayGate';
 import { extendCandles, isCandleGap, needsCandleReload, CANDLE_STALE_MS } from './lib/candles';
 
 const closeTo = (a: number, b: number, eps = 1e-9) => expect(Math.abs(a - b)).toBeLessThan(eps);
@@ -177,24 +177,32 @@ describe('round 3 — R1 replay gate', () => {
     expect(g.needsReplay(opened, 'A', now)).toBe(false);
   });
 
-  it('fetch failures back off 15 s; after 3 failures the gap is given up and live resumes', () => {
+  it('Z8 (round 8): fetch failures back off 15 s → 30 s → 60 s → 120 s (max) and an exposed gap is never given up', () => {
     const g = new ReplayGate();
     const s = st();
+    const waits = [15_000, 30_000, 60_000, 120_000, 120_000, 120_000, 120_000];
+    expect(waits[3]).toBe(REPLAY_MAX_RETRY_MS);
     let t = now;
-    for (let k = 1; k <= 3; k++) {
+    waits.forEach((wait, i) => {
+      const k = i + 1;
       expect(g.begin(s, t)).toContain('A');
-      const last = g.failed('A', t);
+      const warn = g.failed('A', t);
       g.failed('B', t);
       g.release('A'); g.release('B');
-      expect(last).toBe(k === 3);
-      if (k < 3) {
-        expect(g.begin(s, t + 1_000)).toEqual([]); // inside the backoff
-        expect(g.tick(s, 'A', t + 1_000)).toBe('gap'); // still refused
-      }
-      t += REPLAY_RETRY_MS + 1;
-    }
-    expect(g.tick(s, 'A', t)).toBe('live'); // gave up → live (caller warned)
+      expect(warn).toBe(k === 3); // true exactly once, at the 3rd counted failure (caller warns; retries go on)
+      expect(g.fails.A.n).toBe(k);
+      expect(g.tick(s, 'A', t + 1_000)).toBe('gap'); // still refused — never given up (was 'live' after 3 in round 3)
+      expect(g.begin(s, t + wait)).toEqual([]); // inside the backoff
+      t += wait + 1;
+    });
+    expect(g.tick(s, 'A', t)).toBe('gap');
+    expect(g.fails.A.n).toBe(7);
+    // success closes the gap and resets the backoff
+    expect(g.begin(s, t)).toEqual(['A', 'B']);
+    s.lastTickTs.A = t;
+    g.succeeded('A'); g.release('A'); g.release('B');
     expect(g.fails.A).toBeUndefined();
+    expect(g.tick(s, 'A', t + 1_000)).toBe('live');
   });
 });
 
