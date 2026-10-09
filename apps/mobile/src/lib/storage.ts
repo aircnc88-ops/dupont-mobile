@@ -43,6 +43,9 @@ export interface Settings {
   requireRange: boolean;
   notify: boolean;
   showHist: boolean;
+  /** Google Sheets webhook (K_BOT Apps Script) — nothing is sent unless both are set */
+  sheetsUrl: string;
+  sheetsToken: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -63,4 +66,6 @@ export const DEFAULT_SETTINGS: Settings = {
   requireRange: true,
   notify: false,
   showHist: true,
+  sheetsUrl: '',
+  sheetsToken: '',
 };
