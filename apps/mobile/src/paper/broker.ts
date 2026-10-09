@@ -130,6 +130,8 @@ export interface BrokerState {
   seq: number;
   /** ts of the last price processed per symbol (live tick or offline replay) — N1 */
   lastTickTs?: Record<string, number>;
+  /** last price processed per symbol (live tick or offline replay) — Z10: close an unreachable symbol at it */
+  lastPx?: Record<string, number>;
   /** ticker funding rates seen per symbol as [ts, rate] (appended on change / new period) — N5 fallback */
   rateSeen?: Record<string, Array<[number, number]>>;
   /** settled funding rates per symbol keyed by boundary ts (Bitget history-fund-rate) — N5 primary */
@@ -544,6 +546,7 @@ export class PaperBroker {
     const ev: BrokerEvent[] = [];
     const lt = (this.state.lastTickTs ??= {});
     lt[symbol] = Math.max(lt[symbol] ?? 0, ts);
+    (this.state.lastPx ??= {})[symbol] = price; // Z10
     for (const o of [...this.state.pending]) {
       if (o.symbol !== symbol || o.createdAt > openedBefore) continue; // R4 replay: the order must exist before the bar
       const hit = o.side === 'long' ? price <= o.price : price >= o.price;
