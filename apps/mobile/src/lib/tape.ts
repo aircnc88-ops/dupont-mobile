@@ -76,6 +76,17 @@ export class TapeBuckets {
     return !this.gaps.some(([a, z]) => ts < z && end > a);
   }
 
+  /** Raw aggressor totals + trade count for a fully covered candle, or null when not covered (journal logging). */
+  stats(ts: number, intervalMs: number): { buy: number; sell: number; n: number } | null {
+    if (!this.covers(ts, intervalMs)) return null;
+    let buy = 0, sell = 0, n = 0;
+    for (let k = Math.floor(ts / TAPE_BUCKET_MS) * TAPE_BUCKET_MS; k < ts + intervalMs; k += TAPE_BUCKET_MS) {
+      const x = this.b.get(k);
+      if (x) { buy += x.buy; sell += x.sell; n += x.n; }
+    }
+    return { buy, sell, n };
+  }
+
   /** Tape pressure for the candle, or null when not covered / no trades (→ OHLCV fallback). */
   pressure(ts: number, intervalMs: number, minTrades = 1): Pressure | null {
     if (!this.covers(ts, intervalMs)) return null;
