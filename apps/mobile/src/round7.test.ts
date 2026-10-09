@@ -109,7 +109,7 @@ function app(z5 = true) {
 }
 
 describe('round 7 — Z5 clock failures never give a gap up (fix F1)', () => {
-  it('gate: uncounted failures keep n = 0 and the gap closed; counted ones still give up after 3', () => {
+  it('gate: uncounted failures keep n = 0 and the gap closed; counted ones warn at the 3rd and (Z8) never give up', () => {
     const st = { positions: [{ symbol: 'X', openedAt: S }], pending: [], lastTickTs: { X: S } };
     const g = new ReplayGate();
     for (let i = 1; i <= 5; i++) {
@@ -121,7 +121,7 @@ describe('round 7 — Z5 clock failures never give a gap up (fix F1)', () => {
       expect(g.tick(st, 'X', t + 1)).toBe('gap');
     }
     for (let i = 1; i <= 3; i++) expect(g.failed('X', S + 10 * M + i * 20_000)).toBe(i === 3);
-    expect(g.tick(st, 'X', S + 11 * M)).toBe('live');
+    expect(g.tick(st, 'X', S + 11 * M)).toBe('gap'); // Z8 (round 8): still refused after 3 counted failures
   });
 
   for (const skew of [0, 150_000, -90_000]) {
@@ -135,12 +135,14 @@ describe('round 7 — Z5 clock failures never give a gap up (fix F1)', () => {
         a.at(S + 20 * M);
         const d = a.ticksUntil(S + 21 * M + 30_000); // 90 s of live prices, /time keeps failing (5+ replay attempts)
         if (!z5) {
-          // control (round 6): 3 clock failures → given up → the next live price is accepted, minute 12 is dropped
-          expect(a.toasts).toContain('3회 실패');
-          expect(d).toContain('live');
+          // control (clock failures counted, as in round 6): round 6/7 gave the gap up here and missed the stop;
+          // with Z8 (round 8) the 3rd failure only warns — live stays refused and the replay books the stop after sync
+          expect(a.toasts).toEqual(['서버 시간 확인 실패', '3회 실패']); // one clock warning, one 3rd-failure warning
+          expect(d.every((x) => x === 'gap')).toBe(true);
           a.sync();
-          a.ticksUntil(S + 23 * M);
-          expect(a.b.state.positions.length).toBe(1); // stop missed
+          a.ticksUntil(a.serverNow() + 120_000 + 5_000); // at most one capped backoff (120 s) + one tick
+          expect(a.b.state.fills.map((f) => f.reason)).toEqual(['손절 SL']);
+          expect(a.b.state.fills[0].closedAt).toBe(S + 12 * M + 59_999);
           continue;
         }
         expect(d.every((x) => x === 'gap')).toBe(true); // live refused the whole time
