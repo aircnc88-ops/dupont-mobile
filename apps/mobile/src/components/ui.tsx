@@ -30,6 +30,16 @@ export function NumField({ label, value, onChange, step = 'any', suffix }: { lab
     </label>
   );
 }
+export function TextField({ label, value, onChange, type = 'text', placeholder }: { label: string; value: string; onChange: (v: string) => void; type?: 'text' | 'password' | 'url'; placeholder?: string }) {
+  return (
+    <label className="block">
+      <span className="text-[11px] text-muted">{label}</span>
+      <div className="flex items-center bg-panel2 rounded-lg border border-line h-11 px-3">
+        <input type={type} value={value} placeholder={placeholder} autoComplete="off" autoCapitalize="off" spellCheck={false} onChange={(e) => onChange(e.target.value)} className="bg-transparent flex-1 min-w-0 outline-none text-[13px]" />
+      </div>
+    </label>
+  );
+}
 export function Toggle({ on, onChange, label, hint }: { on: boolean; onChange: (v: boolean) => void; label: string; hint?: string }) {
   return (
     <button onClick={() => onChange(!on)} className="w-full flex items-center justify-between py-3 text-left">
