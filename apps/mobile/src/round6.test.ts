@@ -117,7 +117,7 @@ describe('round 6 — Z2 runReplay refuses to stamp with an unmeasured clock (ga
     }
     return { syms, failed };
   }
-  it('cold start, phone 150 s ahead, /time failed, no trade yet → nothing stamped; retried after 15 s once synced', () => {
+  it('cold start, phone 150 s ahead, /time failed, no trade yet → nothing stamped; retried as soon as synced (Z6)', () => {
     const S = Date.UTC(2026, 9, 9, 6, 0);
     const b = new PaperBroker();
     b.slip = 0;
@@ -131,11 +131,10 @@ describe('round 6 — Z2 runReplay refuses to stamp with an unmeasured clock (ga
     expect(r1).toEqual({ syms: ['X'], failed: ['X'] });
     expect(JSON.stringify(b.state)).toBe(before); // lastTickTs / fills / positions untouched — never stamped in the future
     expect(gate.fails.X.n).toBe(1);
-    expect(gate.begin(b.state, phoneNow + REPLAY_RETRY_MS - 1)).toEqual([]); // backoff
-    // the failure was recorded at (unsynced) phone time, so with the phone AHEAD the retry waits skew + 15 s of
-    // server time — live ticks stay refused meanwhile (gate 'gap'), nothing is stamped, the touch is still replayed
-    expect(gate.begin(b.state, S + 20 * 60_000 + 16_000)).toEqual([]);
-    const serverNow = phoneNow + REPLAY_RETRY_MS + 1_000; // synced (WS update print / /time on retry)
+    expect(gate.begin(b.state, phoneNow + REPLAY_RETRY_MS - 1)).toEqual([]); // backoff on the same clock (unchanged)
+    // Z6 (round 7): the failure was recorded at (unsynced) phone time, i.e. in the future of the measured server
+    // clock → due at once instead of after skew + 15 s
+    const serverNow = S + 20 * 60_000 + 16_000; // synced (WS update print / /time on retry)
     const r2 = replayOnce(b, gate, serverNow, true, bars);
     expect(r2.failed).toEqual([]);
     expect(b.state.fills.map((f) => f.reason)).toEqual(['손절 SL']); // the minute-11 touch is not skipped
@@ -143,6 +142,6 @@ describe('round 6 — Z2 runReplay refuses to stamp with an unmeasured clock (ga
   });
   it('App.tsx: the Z2 check sits inside the try right after syncFunding, before any fetch / stamp', () => {
     expect(appSource).toMatch(/try \{\n\s+await syncFunding\(sym, true\);\n\s+if \(!mkt\.clockSynced\(\)\) throw new Error\('server clock unknown'\);[^\n]*\n\s+const now = mkt\.serverNow\(\);/);
-    expect(appSource).toMatch(/catch \{\n\s+if \(gate\.current\.failed\(sym, mkt\.serverNow\(\)\)\)/);
+    expect(appSource).toMatch(/catch \{\n\s+const clockUnknown = !mkt\.clockSynced\(\);[^\n]*\n\s+if \(gate\.current\.failed\(sym, mkt\.serverNow\(\), !clockUnknown\)\)/);
   });
 });
