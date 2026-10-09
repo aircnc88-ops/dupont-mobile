@@ -62,6 +62,19 @@ export async function fetchMinuteBars(symbol: string, from: number, to: number):
   return { bars: [...out.values()].sort((a, b) => a.ts - b.ts), clampedFrom: start };
 }
 
+/** Z1: phone→server clock offset from one request: serverTime minus the request midpoint (phone clock). */
+export const offsetFromServerTime = (serverTime: number, sentAt: number, receivedAt: number): number => serverTime - (sentAt + receivedAt) / 2;
+
+/** Z1: public server time → phone clock offset (ms); null on failure / timeout / a slow round trip. */
+export async function fetchClockOffset(timeoutMs = 4_000, phoneNow: () => number = Date.now): Promise<number | null> {
+  const sentAt = phoneNow();
+  const d = await Promise.race([getJson('/api/v2/public/time'), new Promise<null>((r) => setTimeout(() => r(null), timeoutMs))]).catch(() => null);
+  const receivedAt = phoneNow();
+  const st = Number(d?.serverTime);
+  if (!Number.isFinite(st) || receivedAt - sentAt > timeoutMs) return null;
+  return offsetFromServerTime(st, sentAt, receivedAt);
+}
+
 /** Settled funding rates (public, no keys): fundingTime = the 00/08/16 UTC boundary ts. R6: 100 records ≈ 33 days (covers the 30-day replay). */
 export async function fetchFundingHistory(symbol: string, pageSize = 100): Promise<Array<{ ts: number; rate: number }>> {
   const data = await getJson(`/api/v2/mix/market/history-fund-rate?symbol=${symbol}&productType=usdt-futures&pageSize=${pageSize}`);
