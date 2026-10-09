@@ -75,7 +75,7 @@ export default function App() {
   const FUNDING_WAIT_MS = 180_000; // live: wait up to 3 min after a boundary for the settled rate to be published
   const fundSync = useRef<Record<string, number>>({});
   const syncFunding = async (sym: string, force = false) => {
-    const now = Date.now();
+    const now = Date.now(); // request throttle only (not a broker timestamp) — the phone clock is fine here
     if (!force && now - (fundSync.current[sym] ?? 0) < 30_000) return;
     fundSync.current[sym] = now;
     const h = await fetchFundingHistory(sym).catch(() => null);
@@ -86,10 +86,10 @@ export default function App() {
   const gate = useRef(new ReplayGate());
   /** one live price for `sym`: triggers, then funding for crossed boundaries, then remember the ticker rate */
   const liveTick = (sym: string, price: number, mark: number | undefined, rate: number | undefined) => {
-    const g = gate.current.tick(broker.current.state, sym, Date.now());
+    const g = gate.current.tick(broker.current.state, sym, mkt.serverNow()); // Z1: one (server) clock for every broker / gate timestamp
     if (g === 'replaying') return [];
     if (g === 'gap') { void runReplay(); return []; } // never jump an offline gap with a live price
-    const now = Date.now();
+    const now = mkt.serverNow(); // onPrice / needsSettledRate / accrueFunding / noteTickerRate
     const ev = broker.current.onPrice(sym, price, now, mark);
     if (broker.current.needsSettledRate(sym, now)) void syncFunding(sym);
     ev.push(...broker.current.accrueFunding(sym, mark || price, now, FUNDING_WAIT_MS));
@@ -98,7 +98,9 @@ export default function App() {
   };
   const runReplay = async () => {
     const b = broker.current;
-    const syms = gate.current.begin(b.state, Date.now()); // gates ALL of them before the first await
+    const syms = gate.current.begin(b.state, mkt.serverNow()); // gates ALL of them before the first await
+    // Z1: measure the server clock before stamping anything (a cold start has no trade-based offset yet)
+    if (syms.length) await mkt.syncClock();
     for (const sym of syms) {
       try {
         await syncFunding(sym, true);
@@ -122,11 +124,11 @@ export default function App() {
         if (fund.length > 2) toast(`[재생] ${sym} 펀딩비 ${fund.length}회 반영 (마지막: ${fund[fund.length - 1].message})`, 'info');
         if (clampedFrom > start) toast(`[재생] ${sym} ${mdhm(start)}~${mdhm(clampedFrom)} 구간은 1분봉 제공 범위(30일) 밖 – 재생 생략`, 'warn');
         const lt = (b.state.lastTickTs ??= {});
-        lt[sym] = Math.max(lt[sym] ?? 0, Date.now()); // gap closed (forming minute replayed up to now, Q1); live continues
+        lt[sym] = Math.max(lt[sym] ?? 0, mkt.serverNow()); // gap closed (forming minute replayed up to now, Q1); live continues
         gate.current.succeeded(sym);
         commit();
       } catch {
-        if (gate.current.failed(sym, Date.now())) toast(`[재생] ${sym} 1분봉 조회 3회 실패 – 현재가로 계속 (오프라인 구간 미반영)`, 'down');
+        if (gate.current.failed(sym, mkt.serverNow())) toast(`[재생] ${sym} 1분봉 조회 3회 실패 – 현재가로 계속 (오프라인 구간 미반영)`, 'down');
       } finally {
         gate.current.release(sym);
       }
@@ -221,7 +223,7 @@ export default function App() {
     const r = broker.current.open({
       symbol: s.symbol, side: g.side, qty, price, refPx: refPx(g.side), leverage: s.leverage, sl, targets, setup: g.type, signalId: sigId(g),
       breakoutLevel: g.kind === 'breakout' ? Number(long ? g.box.top : g.box.bottom) : undefined, riskBudget: riskBudgetNow(),
-    });
+    }, mkt.serverNow());
     if (!r.ok) { toast(r.error ?? '진입 실패', 'down'); return; }
     seen.current.add(sigId(g)); save(K_SEEN, [...seen.current].slice(-300));
     toast(`${auto ? '[자동] ' : ''}${TYPE_KO[g.type]} 모의 진입 ${fmt(qty, info.qdp)} @ ${fmt(r.fillPx ?? price, info.dp)}`, 'up');
@@ -237,7 +239,7 @@ export default function App() {
       const lossBar = Math.floor(lastFinal.closedAt / mkt.intervalMs) * mkt.intervalMs;
       if (net < 0 && g.ts <= lossBar + 2 * mkt.intervalMs) return '손실 후 2봉 대기';
     }
-    const day0 = new Date(); day0.setHours(0, 0, 0, 0);
+    const day0 = new Date(mkt.serverNow()); day0.setHours(0, 0, 0, 0); // Z1: local day of the server instant (fills are server-stamped)
     if (realizedRSince(st.fills, day0.getTime()) <= -3) return '일일 손실 한도 −3R 도달';
     return null;
   };
@@ -285,7 +287,7 @@ export default function App() {
   }, [mgmt]);
 
   const closePos = (p: PaperPosition, frac: number, why: string) => {
-    const f = broker.current.closeFraction(p.id, frac, marks[p.symbol] ?? last, why);
+    const f = broker.current.closeFraction(p.id, frac, marks[p.symbol] ?? last, why, mkt.serverNow());
     if (f) toast(`${why} ${fmt(f.qty, symInfo(p.symbol).qdp)} @ ${fmt(f.exit, symInfo(p.symbol).dp)} · 순손익 ${signed(f.netPnl)} USDT`, f.netPnl >= 0 ? 'up' : 'down');
     commit();
   };
@@ -297,7 +299,7 @@ export default function App() {
     const a = sizeAdd(p, { last: refPx(p.side), suggestedSl: sug.sl ? Number(sug.sl) : undefined, budget, wantQty: (initial * (sug.sizePct ?? s.addSizePct)) / 100, step: info.qtyStep });
     if (!(a.qty > 0)) { toast('추가 시 총 리스크가 한도 초과', 'down'); return; }
     if (a.qty * last < MIN_NOTIONAL_USDT) { toast(`추가 수량이 최소 주문 금액(${MIN_NOTIONAL_USDT} USDT) 미만`, 'down'); return; }
-    const r = broker.current.open({ symbol: p.symbol, side: p.side, qty: a.qty, price: last, refPx: refPx(p.side), leverage: p.leverage, sl: a.newSl, targets: [], setup: p.setup, isAdd: true, candleTs: lastClosedTs });
+    const r = broker.current.open({ symbol: p.symbol, side: p.side, qty: a.qty, price: last, refPx: refPx(p.side), leverage: p.leverage, sl: a.newSl, targets: [], setup: p.setup, isAdd: true, candleTs: lastClosedTs }, mkt.serverNow());
     if (!r.ok) { toast(r.error ?? '추가 실패', 'down'); return; }
     toast(`불타기 #${p.adds + 1}: ${fmt(a.qty, info.qdp)} @ ${fmt(r.fillPx ?? last, info.dp)} · SL ${fmt(a.newSl, info.dp)}`, 'up');
     commit();
@@ -367,11 +369,11 @@ export default function App() {
             <div className="flex-1 min-h-0">
               {mkt.candles.length ? (
                 <Chart viewKey={`${s.symbol}:${s.tf}`} candles={mkt.candles} pressures={dv.pressures} box={dv.box} signals={dv.history} positions={myPositions} dp={info.dp} showHist={s.showHist} editBox={editBox}
-                  onBoxEdit={(top, bottom) => { const m = { top, bottom, startTs: manual?.startTs ?? dv.box?.startTime ?? Date.now(), locked: true }; setManual(m); save(`dupont.box.${s.symbol}`, m); }} />
+                  onBoxEdit={(top, bottom) => { const m = { top, bottom, startTs: manual?.startTs ?? dv.box?.startTime ?? mkt.serverNow(), locked: true }; setManual(m); save(`dupont.box.${s.symbol}`, m); }} />
               ) : <div className="p-6 text-muted text-sm">{mkt.err ? `데이터 오류: ${mkt.err}` : '캔들 불러오는 중…'}</div>}
             </div>
             <BoxBar box={dv.box} manual={manual} dp={info.dp} tape={dv.tapeCandles} onUnlock={() => { setManual(null); save(`dupont.box.${s.symbol}`, null); setEditBox(false); }}
-              onEdit={(top, bottom) => { const m = { top, bottom, startTs: manual?.startTs ?? dv.box?.startTime ?? Date.now(), locked: true }; setManual(m); save(`dupont.box.${s.symbol}`, m); }} />
+              onEdit={(top, bottom) => { const m = { top, bottom, startTs: manual?.startTs ?? dv.box?.startTime ?? mkt.serverNow(), locked: true }; setManual(m); save(`dupont.box.${s.symbol}`, m); }} />
             {mgmt.filter((m) => m.flip.alert).map((m) => (
               <div key={m.p.id} className="mx-3 mb-2 rounded-lg bg-warn/15 border border-warn px-3 py-2 flex items-center justify-between">
                 <span className="text-[13px] text-warn font-semibold">⚠ 압력 반전 – 청산 권고 ({m.flip.multiple.toFixed(1)}배)</span>
@@ -400,10 +402,10 @@ export default function App() {
                   toast(`지정가가 현재가 ${d.side === 'long' ? '이상' : '이하'} – 즉시 체결되는 주문은 시장가로 넣으세요`, 'down');
                   return;
                 }
-                const r = broker.current.placeLimit({ symbol: s.symbol, side: d.side, qty, price: limitPrice, leverage: s.leverage, sl, targets, setup, breakoutLevel, riskBudget: riskBudgetNow() });
+                const r = broker.current.placeLimit({ symbol: s.symbol, side: d.side, qty, price: limitPrice, leverage: s.leverage, sl, targets, setup, breakoutLevel, riskBudget: riskBudgetNow() }, mkt.serverNow());
                 toast(r.ok ? `지정가 ${d.side === 'long' ? '롱' : '숏'} 주문 ${fmt(qty, info.qdp)} @ ${fmt(limitPrice, info.dp)}` : r.error ?? '주문 실패', r.ok ? 'up' : 'down');
               } else {
-                const r = broker.current.open({ symbol: s.symbol, side: d.side, qty, price: last, refPx: refPx(d.side), leverage: s.leverage, sl, targets, setup, breakoutLevel, signalId: d.signal ? sigId(d.signal) : undefined, riskBudget: riskBudgetNow() });
+                const r = broker.current.open({ symbol: s.symbol, side: d.side, qty, price: last, refPx: refPx(d.side), leverage: s.leverage, sl, targets, setup, breakoutLevel, signalId: d.signal ? sigId(d.signal) : undefined, riskBudget: riskBudgetNow() }, mkt.serverNow());
                 toast(r.ok ? `${d.side === 'long' ? '롱' : '숏'} 모의 진입 ${fmt(qty, info.qdp)} @ ${fmt(r.fillPx ?? last, info.dp)}` : r.error ?? '진입 실패', r.ok ? 'up' : 'down');
                 if (r.ok && d.signal) { seen.current.add(sigId(d.signal)); save(K_SEEN, [...seen.current].slice(-300)); }
               }
@@ -472,7 +474,7 @@ export default function App() {
             <Card className="p-3">
               <div className="text-sm font-semibold mb-2">자금</div>
               <Row k="시드 / 지갑" v={`${fmt(st.bankroll)} / ${fmt(st.wallet)} USDT`} />
-              <Btn tone="down" className="w-full mt-2" onClick={() => { if (confirm('모의 자금을 200 USDT로 초기화하고 포지션·기록을 삭제할까요?')) { broker.current.reset(DEFAULT_BANKROLL); commit(); toast('200 USDT로 초기화'); } }}>자금 초기화 (200 USDT)</Btn>
+              <Btn tone="down" className="w-full mt-2" onClick={() => { if (confirm('모의 자금을 200 USDT로 초기화하고 포지션·기록을 삭제할까요?')) { broker.current.reset(DEFAULT_BANKROLL, mkt.serverNow()); commit(); toast('200 USDT로 초기화'); } }}>자금 초기화 (200 USDT)</Btn>
             </Card>
             <Card className="p-3 space-y-3">
               <div className="text-sm font-semibold">리스크</div>
