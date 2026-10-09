@@ -165,8 +165,8 @@ export interface BrokerEvent {
   positionId?: string;
 }
 
-export function newBrokerState(bankroll = DEFAULT_BANKROLL): BrokerState {
-  return { wallet: bankroll, bankroll, positions: [], fills: [], pending: [], equityCurve: [{ t: Date.now(), equity: bankroll }], seq: 0 };
+export function newBrokerState(bankroll = DEFAULT_BANKROLL, ts = Date.now()): BrokerState {
+  return { wallet: bankroll, bankroll, positions: [], fills: [], pending: [], equityCurve: [{ t: ts, equity: bankroll }], seq: 0 };
 }
 
 const dir = (s: Side) => (s === 'long' ? 1 : -1);
@@ -240,8 +240,8 @@ export class PaperBroker {
     return `${prefix}${Date.now().toString(36)}${this.state.seq}`;
   }
 
-  reset(bankroll = DEFAULT_BANKROLL): void {
-    this.state = newBrokerState(bankroll);
+  reset(bankroll = DEFAULT_BANKROLL, ts = Date.now()): void {
+    this.state = newBrokerState(bankroll, ts);
   }
 
   usedMargin(): number {
@@ -663,10 +663,12 @@ export function tradeStats(fills: ClosedFill[], openIds: Iterable<string> = []):
     funding += f.funding ?? 0;
     if (open.has(f.positionId)) { partialNet += f.netPnl; continue; }
     // Q5: one R denominator per position — Σ net / the LAST fill's riskUsd (adds raise riskUsd);
-    // legacy fills without riskUsd fall back to summing their per-fill R
-    const x = byPos.get(f.positionId) ?? { net: 0, r: 0, hasR: true, risk: 0 };
+    // legacy fills without riskUsd fall back to summing their per-fill R. A position counts toward the
+    // R stats as soon as ANY of its fills carries R info (r or riskUsd) — exactly the positions
+    // realizedRSince counts (round 5: a legacy first fill without r no longer drops the position)
+    const x = byPos.get(f.positionId) ?? { net: 0, r: 0, hasR: false, risk: 0 };
     x.net += f.netPnl;
-    if (f.r === undefined) x.hasR = false;
+    if (f.r !== undefined || f.riskUsd) x.hasR = true;
     if (f.riskUsd) x.risk = f.riskUsd;
     x.r = x.risk > 0 ? x.net / x.risk : x.r + (f.r ?? 0);
     byPos.set(f.positionId, x);
