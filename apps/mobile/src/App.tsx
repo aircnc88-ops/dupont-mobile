@@ -104,6 +104,7 @@ export default function App() {
     for (const sym of syms) {
       try {
         await syncFunding(sym, true);
+        if (!mkt.clockSynced()) throw new Error('server clock unknown'); // Z2: retry via gate.failed (15 s) instead of stamping phone time
         const now = mkt.serverNow();
         const start = Math.floor(replayFrom(b.state, sym) / 60_000) * 60_000;
         const { bars, clampedFrom } = await fetchMinuteBars(sym, start, now);
