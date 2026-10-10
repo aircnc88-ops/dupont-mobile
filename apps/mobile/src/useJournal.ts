@@ -3,6 +3,7 @@ import type { Pressure, Signal } from '@bitget-sim/dupont';
 import type { Candle } from './data/bitget';
 import type { BrokerState } from './paper/broker';
 import type { TapeBuckets } from './lib/tape';
+import { obFieldsFor, type ObSampler } from './lib/obPressure';
 import { loadRaw, save } from './lib/storage';
 import { openLogStore, signalKey, type LogStore } from './lib/logStore';
 import { SheetsSync, type SyncStatus } from './lib/sheetsSync';
@@ -11,7 +12,8 @@ import { signalRowFor, tapeRowFor, tradesFromFills, type PosMeta } from './lib/j
 
 /**
  * Journal + Google Sheets sync (logging only — never touches trading decisions):
- *  - tape_pressure: each CLOSED candle fully covered by the live trade tape → IndexedDB (deduped, capped) and the webhook queue
+ *  - tape_pressure: each CLOSED candle fully covered by the live trade tape → IndexedDB (deduped, capped) and the webhook queue;
+ *    r13: the IndexedDB record also carries the candle's order-book pressure (ob_* fields, lib/obPressure.ts; exported in the CSV)
  *  - signals: every generated (live) signal → IndexedDB; sent once its outcome is final (taken, or no longer takeable
  *    after the next candle closed) because the sheet is append-only
  *  - trades: one row per closed paper position (sent once)
@@ -25,6 +27,8 @@ export interface JournalArgs {
   symbol: string; tf: string; intervalMs: number;
   closed: Candle[]; pressures: Pressure[]; live: Signal[];
   tape: React.MutableRefObject<TapeBuckets>; serverNow: () => number;
+  /** r13: order-book pressure sampler (logging only); its ob_* fields are stored next to the tape row */
+  ob?: React.MutableRefObject<ObSampler>;
   state: BrokerState; bv: number; autoPaper: boolean; url: string; token: string;
 }
 
@@ -80,7 +84,8 @@ export function useJournal(a: JournalArgs) {
       const row = tapeRowFor(a.symbol, a.tf, c, a.tape.current.stats(c.ts, a.intervalMs));
       if (!row) continue;
       logged.current.add(key);
-      store.current.addTape(row, c.ts, { open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume })
+      const obf = a.ob ? obFieldsFor(a.ob.current.buckets.stats(c.ts, a.intervalMs), a.intervalMs) : {}; // r13
+      store.current.addTape(row, c.ts, { open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume, ...obf })
         .then((isNew) => { if (isNew) sync.current.enqueue('tape_pressure', [row]); })
         .catch(() => {});
     }
