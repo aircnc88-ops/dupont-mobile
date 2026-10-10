@@ -1,4 +1,5 @@
 import type { SignalRow, TapeRow } from './sheetsSchema';
+import type { ObFields } from './obPressure';
 
 /**
  * Local journal (IndexedDB): per-candle tape pressure and every generated signal.
@@ -7,7 +8,7 @@ import type { SignalRow, TapeRow } from './sheetsSchema';
  */
 export type LogTab = 'tape_pressure' | 'signals';
 /** a stored record: the sheet row + its dedupe key + numeric time (prune order) + optional extras (tape: candle OHLCV) */
-export type Stored<R> = R & { key: string; tsMs: number; open?: number; high?: number; low?: number; close?: number; volume?: number };
+export type Stored<R> = R & { key: string; tsMs: number; open?: number; high?: number; low?: number; close?: number; volume?: number } & Partial<ObFields>;
 export const LOG_CAPS: Record<LogTab, number> = { tape_pressure: 50_000, signals: 20_000 };
 
 export const tapeKey = (symbol: string, tf: string, tsMs: number) => `${symbol}|${tf}|${tsMs}`;
@@ -73,7 +74,7 @@ export class LogStore {
   constructor(public backend: LogBackend = new MemoryBackend(), private caps: Record<LogTab, number> = LOG_CAPS) {}
 
   /** insert a closed candle's tape row once (first write wins); returns true when it was new */
-  async addTape(row: TapeRow, tsMs: number, extra: { open?: number; high?: number; low?: number; close?: number; volume?: number } = {}): Promise<boolean> {
+  async addTape(row: TapeRow, tsMs: number, extra: { open?: number; high?: number; low?: number; close?: number; volume?: number } & Partial<ObFields> = {}): Promise<boolean> {
     const key = tapeKey(row.symbol, row.tf, tsMs);
     if (await this.backend.get('tape_pressure', key)) return false;
     await this.backend.put('tape_pressure', { ...row, ...extra, key, tsMs });
