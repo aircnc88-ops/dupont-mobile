@@ -13,7 +13,7 @@ import { SYMBOLS, TIMEFRAMES, symInfo, floorQty, MIN_NOTIONAL_USDT } from './lib
 import { fmt, mdhm, pct, signed } from './lib/format';
 import { ReplayGate, replayFrom, REPLAY_MAX_FAILS } from './lib/replayGate';
 import { useJournal, type Journal } from './useJournal';
-import { SKIP, toCsv, type SheetTab } from './lib/sheetsSchema';
+import { SKIP, toCsv, toTapeCsv, type SheetTab } from './lib/sheetsSchema';
 import { configured } from './lib/sheetsSync';
 import { tradesFromFills } from './lib/journal';
 
@@ -181,7 +181,7 @@ export default function App() {
   const available = broker.current.available();
   const myPositions = st.positions.filter((p) => p.symbol === s.symbol);
   // journal (tape pressure / signals / trades → IndexedDB + optional Google Sheets webhook) — logging only
-  const journal = useJournal({ symbol: s.symbol, tf: s.tf, intervalMs: mkt.intervalMs, closed: dv.closed, pressures: dv.pressures, live: dv.live, tape: mkt.tape, serverNow: mkt.serverNow,
+  const journal = useJournal({ symbol: s.symbol, tf: s.tf, intervalMs: mkt.intervalMs, closed: dv.closed, pressures: dv.pressures, live: dv.live, tape: mkt.tape, ob: mkt.ob, serverNow: mkt.serverNow,
     state: st, bv, autoPaper: s.autoPaper, url: s.sheetsUrl, token: s.sheetsToken });
 
   // ---- signals ----
@@ -740,7 +740,7 @@ function HistoryTab({ broker, journal }: { broker: PaperBroker; journal: Journal
   const exportCsv = async (tab: SheetTab) => {
     if (tab === 'trades') return downloadCsv(toCsv('trades', tradesFromFills(st.fills, journal.meta)), 'dupont-trades');
     const rows = tab === 'tape_pressure' ? await journal.store.all('tape_pressure') : await journal.store.all('signals');
-    downloadCsv(toCsv(tab, rows), tab === 'tape_pressure' ? 'dupont-tape-pressure' : 'dupont-signals');
+    downloadCsv(tab === 'tape_pressure' ? toTapeCsv(rows) : toCsv(tab, rows), tab === 'tape_pressure' ? 'dupont-tape-pressure' : 'dupont-signals'); // r13: + ob_* columns
   };
   return (
     <div className="flex-1 overflow-y-auto p-3 space-y-3">
@@ -765,10 +765,10 @@ function HistoryTab({ broker, journal }: { broker: PaperBroker; journal: Journal
         <div className="text-sm font-semibold mb-2">CSV 내보내기</div>
         <div className="grid grid-cols-3 gap-2">
           <Btn className="h-10 px-2 text-[12px]" onClick={() => exportCsv('trades')} disabled={!st.fills.some((f) => f.final)}>거래</Btn>
-          <Btn className="h-10 px-2 text-[12px]" onClick={() => exportCsv('tape_pressure')} disabled={!counts?.tape}>테이프 압력</Btn>
+          <Btn className="h-10 px-2 text-[12px]" onClick={() => exportCsv('tape_pressure')} disabled={!counts?.tape}>테이프·호가 압력</Btn>
           <Btn className="h-10 px-2 text-[12px]" onClick={() => exportCsv('signals')} disabled={!counts?.sig}>신호</Btn>
         </div>
-        <div className="text-[10px] text-muted mt-1 num">기기 기록: 테이프 압력 {counts?.tape ?? '…'}캔들 · 신호 {counts?.sig ?? '…'}건 (최대 5만/2만, 오래된 것부터 삭제)</div>
+        <div className="text-[10px] text-muted mt-1 num">기기 기록: 테이프·호가 압력 {counts?.tape ?? '…'}캔들 · 신호 {counts?.sig ?? '…'}건 (최대 5만/2만, 오래된 것부터 삭제)</div>
       </Card>
       {[...st.fills].reverse().map((f) => (
         <Card key={f.id} className="p-3">
