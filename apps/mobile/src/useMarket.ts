@@ -3,6 +3,7 @@ import { fetchCandles, fetchClockOffset, fetchTicker, type Candle, type TickerIn
 import { BitgetPublicFeed, TradeDedupe, type WsBook, type WsStatus } from './data/ws';
 import { TF_MS } from './lib/symbols';
 import { TapeBuckets } from './lib/tape';
+import { ObSampler, OB_SAMPLE_MS } from './lib/obPressure';
 import { extendCandles, needsCandleReload } from './lib/candles';
 
 /**
@@ -21,6 +22,8 @@ import { extendCandles, needsCandleReload } from './lib/candles';
  *    uses `serverNow`; Z3: the subscribe snapshot (history) never sets the offset; Z2: `clockSynced()`
  *    is false until one measurement succeeded (the replay then retries instead of stamping phone time)
  *  - books15 orderbook, ticker (mark / funding / 24h)
+ *  - r13 (logging only): full-depth `books` → local book sampled once per second into 1-minute order-book
+ *    buckets (`ob`, lib/obPressure.ts); read only by the journal, never by signals / entries / the broker
  */
 export function useMarket(symbol: string, tf: string) {
   const [candles, setCandles] = useState<Candle[]>([]);
@@ -37,6 +40,8 @@ export function useMarket(symbol: string, tf: string) {
   const [err, setErr] = useState('');
   const [tapeVer, setTapeVer] = useState(0);
   const tape = useRef(new TapeBuckets());
+  /** r13: order-book pressure sampler (logging only) */
+  const ob = useRef(new ObSampler());
   const clockOffset = useRef(0);
   /** Z2: true once the offset was measured (a WS update print or a /time sync) — never phone-clock-only */
   const synced = useRef(false);
@@ -50,6 +55,8 @@ export function useMarket(symbol: string, tf: string) {
   // WS per symbol
   useEffect(() => {
     tape.current = new TapeBuckets();
+    ob.current = new ObSampler();
+    const obs = ob.current;
     setBook(null);
     let dirty = false;
     const dedupe = new TradeDedupe();
@@ -58,9 +65,11 @@ export function useMarket(symbol: string, tf: string) {
         setStatus(s);
         // N3: the gap starts at the last message on the dead socket (a half-open socket is only noticed ~55–80 s later)
         if (s === 'reconnecting' || s === 'closed') tape.current.disconnected((feed.lastMsgAt || Date.now()) + clockOffset.current);
+        if (s === 'reconnecting') obs.onDisconnect(Date.now() + clockOffset.current); // r13: the book must be rebuilt from a new snapshot
       },
       ticker: (t) => setTicker((prev) => ({ ...(prev?.sym === symbol ? prev : t), ...t, sym: symbol, at: performance.now() })), // Z11: never merge into another symbol's ticker; Z12: stamp arrival
       book: (b) => { bookSym.current = symbol; setBook(b); }, // Z11 (book)
+      depth: (p) => obs.onPush(p, Date.now(), Date.now() + clockOffset.current), // r13: logging only
       trades: (raw, snapshot) => {
         const ts = dedupe.filter(raw); // C6: repeats (by tradeId) never count twice
         if (!raw.length) return;
@@ -80,7 +89,8 @@ export function useMarket(symbol: string, tf: string) {
     });
     feed.start();
     const flush = setInterval(() => { if (dirty) { dirty = false; setTapeVer((v) => v + 1); } }, 1000);
-    return () => { feed.stop(); clearInterval(flush); };
+    const obTick = setInterval(() => { obs.tick(Date.now(), Date.now() + clockOffset.current); }, OB_SAMPLE_MS); // r13
+    return () => { feed.stop(); clearInterval(flush); clearInterval(obTick); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [symbol]);
 
@@ -159,5 +169,5 @@ export function useMarket(symbol: string, tf: string) {
   const serverNow = () => Date.now() + clockOffset.current;
   // Z11: right after a symbol switch the state still holds the previous symbol's ticker / candles — never expose them
   return { candles: candlesSym.current === symbol ? candles : [], ticker: ticker?.sym === symbol && (ticker.at ?? 0) >= since.current.at ? ticker : null, // Z12
-    book: bookSym.current === symbol ? book : null, status, err, tape, tapeVer, intervalMs: ms, serverNow, syncClock, clockSynced: () => synced.current };
+    book: bookSym.current === symbol ? book : null, status, err, tape, ob, tapeVer, intervalMs: ms, serverNow, syncClock, clockSynced: () => synced.current };
 }
