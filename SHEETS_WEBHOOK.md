@@ -102,3 +102,34 @@ A signal's outcome is final when it is **taken**, or when the next candle has cl
 - When a store is over its cap, the oldest records by candle/signal time are pruned.
 - tape records also keep the candle OHLCV (open/high/low/close/volume) on the device. These fields are not sent and not exported.
 - 기록 → CSV 내보내기 has 거래 / 테이프 압력 / 신호. Each file uses exactly the columns above.
+
+## r13: order-book pressure (logging only, 2026-10-10)
+Design picked by TypeSafe Jev (D2 depth definition, S1 storage, 1 s sampling): `apps/mobile/src/lib/obPressure.ts`.
+- Source: Bitget v2 public WS `books` (full depth: snapshot BTC/ETH 500, SOL 200 levels per side, then `update` pushes
+  chained by `seq`/`pseq`; a break or reconnect drops the book and resubscribes for a fresh snapshot).
+- One sample per second from the local book; per 1-minute bucket; a candle = sum of its minutes (any timeframe).
+- PRIMARY (video's "buy vs sell pressure" = resting bids vs asks): avg USDT notional within ±10 bps of mid (`ob_bid`, `ob_ask`).
+- Never read by signals, entries, auto-paper or the broker.
+
+Stored on the same IndexedDB `tape_pressure` record (same row-existence rule as before: closed, tape-covered candle) and
+exported in the 기록 → CSV "테이프·호가 압력" file after K_BOT's 9 columns:
+
+| column | type | meaning |
+|---|---|---|
+| ob_def | string | `band10bps_notional_twa_1s` (primary definition id) |
+| ob_samples | number | 1 s book samples inside the candle |
+| ob_cov | number | samples / candle seconds (0–1) |
+| ob_full | boolean | `ob_cov ≥ 0.9` and no book sequence break / disconnect in the candle |
+| ob_bid / ob_ask | number | PRIMARY: avg USDT notional of bids / asks within ±10 bps of mid |
+| ob_ratio | number | ob_bid / (ob_bid + ob_ask), 4 dp |
+| ob_imb_avg / ob_imb_min / ob_imb_max / ob_imb_last | number | per-sample imbalance (bid−ask)/(bid+ask) of the primary: mean, min, max, last sample |
+| ob_bid5 / ob_ask5 | number | avg base size of the top 5 levels |
+| ob_bid15 / ob_ask15 | number | avg base size of the top 15 levels |
+| ob_bid_b5 / ob_ask_b5 | number | avg USDT notional within ±5 bps of mid |
+
+A candle with no samples has `ob_samples 0`, `ob_full false` and empty values. Rows stored before r13 export empty ob_* cells.
+
+**Sheet:** the webhook still sends exactly K_BOT's 9 `tape_pressure` columns, because Code.gs maps only its SCHEMA columns.
+To get ob_* into the sheet: K_BOT appends the 17 ob_* names to `SCHEMA.tape_pressure` in Code.gs (and the header row of an
+existing tab), redeploys, and the app switches `SHEETS_COLUMNS.tape_pressure` to `TAPE_SHEET_COLUMNS_V2` in the same release.
+Proposed Code.gs: `/workspace/dupont-ob/Code_v2_proposed.gs` (not deployed).
